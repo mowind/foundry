@@ -16,9 +16,9 @@ workspace = true
 
 [build-dependencies]
 vergen = { workspace = true, default-features = false, features = [
-    "build",
-    "git",
-    "gitcl",
+  "build",
+  "git",
+  "gitcl",
 ] }
 
 [dependencies]
@@ -40,9 +40,10 @@ alloy-provider.workspace = true
 alloy-rpc-types = { workspace = true, features = ["k256"] }
 alloy-signer.workspace = true
 alloy-signer-local = { workspace = true, features = [
-    "mnemonic-all-languages",
-    "keystore",
+  "mnemonic-all-languages",
+  "keystore",
 ] }
+alloy-signer-sm = { workspace = true, features = ["keystore"], optional = true }
 parking_lot.workspace = true
 alloy-consensus = { workspace = true, features = ["k256"] }
 alloy-network.workspace = true
@@ -69,3 +70,6 @@ tracing.workspace = true
 walkdir.workspace = true
 proptest.workspace = true
 serde.workspace = true
+
+[features]
+sm = ["dep:alloy-signer-sm", "revm/sm", "alloy-primitives/sm"]

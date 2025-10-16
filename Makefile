@@ -11,7 +11,7 @@ PROFILE ?= dev
 ifeq ($(OS),Windows_NT)
     FEATURES ?= rustls aws-kms cli asm-keccak
 else
-    FEATURES ?= jemalloc rustls aws-kms cli asm-keccak
+    FEATURES ?= jemalloc rustls cli sm
 endif
 
 ##@ Help

@@ -5,6 +5,8 @@ use alloy_primitives::{Address, PrimitiveSignature, B256, U256};
 use alloy_rpc_types::Authorization;
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
+#[cfg(feature = "sm")]
+use alloy_signer_sm::SmSigner;
 use alloy_sol_types::SolValue;
 use foundry_wallets::{multi_wallet::MultiWallet, WalletSigner};
 use parking_lot::Mutex;
@@ -217,6 +219,12 @@ impl Wallets {
         self.inner.lock().multi_wallet.add_signer(WalletSigner::Local(wallet));
     }
 
+    /// Locks inner Mutex and adds a sm2 signer to the [MultiWallet].
+    #[cfg(feature = "sm")]
+    pub fn add_sm_signer(&self, wallet: SmSigner) {
+        self.inner.lock().multi_wallet.add_signer(WalletSigner::Sm(wallet));
+    }
+
     /// Locks inner Mutex and returns all signer addresses in the [MultiWallet].
     pub fn signers(&self) -> Result<Vec<Address>> {
         Ok(self.inner.lock().multi_wallet.signers()?.keys().cloned().collect())
@@ -283,7 +291,10 @@ fn broadcast_key(ccx: &mut CheatsCtxt, private_key: &U256, single_call: bool) ->
     let result = broadcast(ccx, Some(&new_origin), single_call);
     if result.is_ok() {
         let wallets = ccx.state.wallets();
+        #[cfg(not(feature = "sm"))]
         wallets.add_local_signer(wallet);
+        #[cfg(feature = "sm")]
+        wallets.add_sm_signer(wallet);
     }
     result
 }

@@ -6,14 +6,21 @@ use alloy_primitives::{address, b256, hex, Address, B256};
 ///
 /// This is calculated as:
 /// `address(bytes20(uint160(uint256(keccak256('hevm cheat code')))))`
+#[cfg(not(feature = "sm"))]
 pub const CHEATCODE_ADDRESS: Address = address!("7109709ECfa91a80626fF3989D68f67F5b1DD12D");
+#[cfg(feature = "sm")]
+pub const CHEATCODE_ADDRESS: Address = address!("eeA1baB40C3Dde29Ab34795683a0fDE8f2D6fD88");
 
 /// The contract hash at [`CHEATCODE_ADDRESS`].
 ///
 /// This is calculated as:
 /// `keccak256(abi.encodePacked(CHEATCODE_ADDRESS))`.
+#[cfg(not(feature = "sm"))]
 pub const CHEATCODE_CONTRACT_HASH: B256 =
     b256!("b0450508e5a2349057c3b4c9c84524d62be4bb17e565dbe2df34725a26872291");
+#[cfg(feature = "sm")]
+pub const CHEATCODE_CONTRACT_HASH: B256 =
+    b256!("4092a06b8071cff594e1982f75a8f44ab4c138bc6fce0878ce7a7fcc80d86162");
 
 /// The Hardhat console address.
 ///

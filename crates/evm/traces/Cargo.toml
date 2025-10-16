@@ -24,10 +24,10 @@ foundry-evm-core.workspace = true
 alloy-dyn-abi = { workspace = true, features = ["arbitrary", "eip712"] }
 alloy-json-abi.workspace = true
 alloy-primitives = { workspace = true, features = [
-    "serde",
-    "getrandom",
-    "arbitrary",
-    "rlp",
+  "serde",
+  "getrandom",
+  "arbitrary",
+  "rlp",
 ] }
 alloy-sol-types.workspace = true
 revm-inspectors.workspace = true
@@ -46,3 +46,6 @@ revm.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[features]
+sm = ["revm/sm", "alloy-primitives/sm", "foundry-evm-core/sm"]

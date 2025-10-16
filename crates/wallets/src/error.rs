@@ -2,6 +2,8 @@ use alloy_primitives::hex::FromHexError;
 use alloy_signer::k256::ecdsa;
 use alloy_signer_ledger::LedgerError;
 use alloy_signer_local::LocalSignerError;
+#[cfg(feature = "sm")]
+use alloy_signer_sm::SmSignerError;
 use alloy_signer_trezor::TrezorError;
 
 #[cfg(feature = "aws-kms")]
@@ -34,6 +36,9 @@ pub enum WalletSignerError {
     #[error(transparent)]
     #[cfg(feature = "gcp-kms")]
     Gcp(#[from] GcpSignerError),
+    #[error(transparent)]
+    #[cfg(feature = "sm")]
+    Sm(#[from] SmSignerError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]

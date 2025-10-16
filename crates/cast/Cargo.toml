@@ -22,9 +22,9 @@ path = "bin/main.rs"
 
 [build-dependencies]
 vergen = { workspace = true, default-features = false, features = [
-    "build",
-    "git",
-    "gitcl",
+  "build",
+  "git",
+  "gitcl",
 ] }
 
 [dependencies]
@@ -45,10 +45,10 @@ alloy-json-rpc.workspace = true
 alloy-network.workspace = true
 alloy-primitives.workspace = true
 alloy-provider = { workspace = true, features = [
-    "reqwest",
-    "ws",
-    "ipc",
-    "trace-api",
+  "reqwest",
+  "ws",
+  "ipc",
+  "trace-api",
 ] }
 alloy-rlp.workspace = true
 alloy-rpc-types = { workspace = true, features = ["eth", "trace"] }
@@ -68,6 +68,9 @@ serde.workspace = true
 
 # aws-kms
 aws-sdk-kms = { version = "1", default-features = false, optional = true }
+
+# sm
+alloy-signer-sm = { workspace = true, features = ["keystore"], optional = true }
 
 # bin
 foundry-cli.workspace = true
@@ -107,6 +110,12 @@ asm-keccak = ["alloy-primitives/asm-keccak"]
 jemalloc = ["dep:tikv-jemallocator"]
 aws-kms = ["foundry-wallets/aws-kms", "dep:aws-sdk-kms"]
 isolate-by-default = ["foundry-config/isolate-by-default"]
+sm = [
+  "dep:alloy-signer-sm",
+  "foundry-evm/sm",
+  "foundry-wallets/sm",
+  "alloy-primitives/sm",
+]
 
 [[bench]]
 name = "vanity"

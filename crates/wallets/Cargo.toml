@@ -17,9 +17,14 @@ foundry-config.workspace = true
 
 alloy-primitives.workspace = true
 alloy-signer = { workspace = true, features = ["eip712"] }
-alloy-signer-local = { workspace = true, features = ["mnemonic", "keystore"] }
-alloy-signer-ledger = { workspace = true, features = ["eip712"] }
-alloy-signer-trezor.workspace = true
+alloy-signer-local = { workspace = true, features = [
+  "mnemonic",
+  "keystore",
+] }
+alloy-signer-ledger = { workspace = true, features = [
+  "eip712",
+] }
+alloy-signer-trezor = { workspace = true }
 alloy-network.workspace = true
 alloy-consensus.workspace = true
 alloy-sol-types.workspace = true
@@ -36,6 +41,9 @@ gcloud-sdk = { version = "0.25", features = [
   "google-cloud-kms-v1",
   "google-longrunning",
 ], optional = true }
+
+# sm2
+alloy-signer-sm = { workspace = true, features = ["keystore"], optional = true }
 
 async-trait.workspace = true
 clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }
@@ -55,3 +63,4 @@ default = ["rustls"]
 rustls = ["aws-sdk-kms?/rustls"]
 aws-kms = ["dep:alloy-signer-aws", "dep:aws-config", "dep:aws-sdk-kms"]
 gcp-kms = ["dep:alloy-signer-gcp", "dep:gcloud-sdk"]
+sm = ["dep:alloy-signer-sm", "alloy-primitives/sm"]

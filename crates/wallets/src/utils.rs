@@ -1,7 +1,10 @@
 use crate::{error::PrivateKeyError, PendingSigner, WalletSigner};
 use alloy_primitives::{hex::FromHex, B256};
 use alloy_signer_ledger::HDPath as LedgerHDPath;
+#[cfg(not(feature = "sm"))]
 use alloy_signer_local::PrivateKeySigner;
+#[cfg(feature = "sm")]
+use alloy_signer_sm::SmSigner;
 use alloy_signer_trezor::HDPath as TrezorHDPath;
 use eyre::{Context, Result};
 use foundry_config::Config;
@@ -23,11 +26,24 @@ pub fn create_private_key_signer(private_key_str: &str) -> Result<WalletSigner> 
         ensure_pk_not_env(private_key_str)?;
         eyre::bail!("Failed to decode private key")
     };
-    match PrivateKeySigner::from_bytes(&private_key) {
-        Ok(pk) => Ok(WalletSigner::Local(pk)),
-        Err(err) => {
-            ensure_pk_not_env(private_key_str)?;
-            eyre::bail!("Failed to create wallet from private key: {err}")
+    #[cfg(not(feature = "sm"))]
+    {
+        match PrivateKeySigner::from_bytes(&private_key) {
+            Ok(pk) => Ok(WalletSigner::Local(pk)),
+            Err(err) => {
+                ensure_pk_not_env(private_key_str)?;
+                eyre::bail!("Failed to create wallet from private key: {err}")
+            }
+        }
+    }
+    #[cfg(feature = "sm")]
+    {
+        match SmSigner::from_bytes(&private_key) {
+            Ok(pk) => Ok(WalletSigner::Sm(pk)),
+            Err(err) => {
+                ensure_pk_not_env(private_key_str)?;
+                eyre::bail!("Failed to create wallet from private key: {err}")
+            }
         }
     }
 }
@@ -140,9 +156,18 @@ pub fn create_keystore_signer(
     }?;
 
     if let Some(password) = password {
-        let wallet = PrivateKeySigner::decrypt_keystore(path, password)
-            .wrap_err_with(|| format!("Failed to decrypt keystore {path:?}"))?;
-        Ok((Some(WalletSigner::Local(wallet)), None))
+        #[cfg(not(feature = "sm"))]
+        {
+            let wallet = PrivateKeySigner::decrypt_keystore(path, password)
+                .wrap_err_with(|| format!("Failed to decrypt keystore {path:?}"))?;
+            Ok((Some(WalletSigner::Local(wallet)), None))
+        }
+        #[cfg(feature = "sm")]
+        {
+            let wallet = SmSigner::decrypt_keystore(path, password)
+                .wrap_err_with(|| format!("Failed to decrypt keystore {path:?}"))?;
+            Ok((Some(WalletSigner::Sm(wallet)), None))
+        }
     } else {
         Ok((None, Some(PendingSigner::Keystore(path.clone()))))
     }

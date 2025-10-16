@@ -58,3 +58,11 @@ alloy-consensus.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[features]
+sm = [
+  "foundry-evm/sm",
+  "forge-script-sequence/sm",
+  "foundry-wallets/sm",
+  "alloy-primitives/sm",
+]

@@ -19,6 +19,11 @@ use p256::ecdsa::{
     signature::hazmat::PrehashSigner, Signature as P256Signature, SigningKey as P256SigningKey,
 };
 
+#[cfg(feature = "sm")]
+use alloy_signer_sm::{
+    Signature as SmSignature, SigningKey as SmSigningKey, SmSigner, VerifyingKey as SmVerifyingKey,
+};
+
 /// The BIP32 default derivation path prefix.
 const DEFAULT_DERIVATION_PATH_PREFIX: &str = "m/44'/60'/0'/0/";
 
@@ -97,6 +102,7 @@ impl Cheatcode for rememberKeyCall {
 }
 
 impl Cheatcode for rememberKeys_0Call {
+    #[cfg(not(feature = "sm"))]
     fn apply(&self, state: &mut Cheatcodes) -> Result {
         let Self { mnemonic, derivationPath, count } = self;
         let wallets = derive_wallets::<English>(mnemonic, derivationPath, *count)?;
@@ -108,9 +114,15 @@ impl Cheatcode for rememberKeys_0Call {
 
         Ok(addresses.abi_encode())
     }
+    #[cfg(feature = "sm")]
+    fn apply(&self, _state: &mut Cheatcodes) -> Result {
+        let addresses = Vec::<Address>::new();
+        Ok(addresses.abi_encode())
+    }
 }
 
 impl Cheatcode for rememberKeys_1Call {
+    #[cfg(not(feature = "sm"))]
     fn apply(&self, state: &mut Cheatcodes) -> Result {
         let Self { mnemonic, derivationPath, language, count } = self;
         let wallets = derive_wallets_str(mnemonic, derivationPath, language, *count)?;
@@ -122,11 +134,24 @@ impl Cheatcode for rememberKeys_1Call {
 
         Ok(addresses.abi_encode())
     }
+    #[cfg(feature = "sm")]
+    fn apply(&self, _state: &mut Cheatcodes) -> Result {
+        let addresses = Vec::<Address>::new();
+        Ok(addresses.abi_encode())
+    }
 }
 
+#[cfg(not(feature = "sm"))]
 fn inject_wallet(state: &mut Cheatcodes, wallet: LocalSigner<SigningKey>) -> Address {
     let address = wallet.address();
     state.wallets().add_local_signer(wallet);
+    address
+}
+
+#[cfg(feature = "sm")]
+fn inject_wallet(state: &mut Cheatcodes, wallet: SmSigner) -> Address {
+    let address = wallet.address();
+    state.wallets().add_sm_signer(wallet);
     address
 }
 
@@ -202,19 +227,38 @@ impl Cheatcode for publicKeyP256Call {
 ///
 /// If 'label' is set to 'Some()', assign that label to the associated ETH address in state
 fn create_wallet(private_key: &U256, label: Option<&str>, state: &mut Cheatcodes) -> Result {
-    let key = parse_private_key(private_key)?;
-    let addr = alloy_signer::utils::secret_key_to_address(&key);
+    #[cfg(not(feature = "sm"))]
+    {
+        let key = parse_private_key(private_key)?;
+        let addr = alloy_signer::utils::secret_key_to_address(&key);
 
-    let pub_key = key.verifying_key().as_affine().to_encoded_point(false);
-    let pub_key_x = U256::from_be_bytes((*pub_key.x().unwrap()).into());
-    let pub_key_y = U256::from_be_bytes((*pub_key.y().unwrap()).into());
+        let pub_key = key.verifying_key().as_affine().to_encoded_point(false);
+        let pub_key_x = U256::from_be_bytes((*pub_key.x().unwrap()).into());
+        let pub_key_y = U256::from_be_bytes((*pub_key.y().unwrap()).into());
 
-    if let Some(label) = label {
-        state.labels.insert(addr, label.into());
+        if let Some(label) = label {
+            state.labels.insert(addr, label.into());
+        }
+
+        Ok(Wallet { addr, publicKeyX: pub_key_x, publicKeyY: pub_key_y, privateKey: *private_key }
+            .abi_encode())
     }
+    #[cfg(feature = "sm")]
+    {
+        let key = parse_private_key_sm2(private_key)?;
+        let addr = alloy_signer_sm::secret_key_to_address(&key);
 
-    Ok(Wallet { addr, publicKeyX: pub_key_x, publicKeyY: pub_key_y, privateKey: *private_key }
-        .abi_encode())
+        let pub_key = key.verifying_key().as_affine().to_encoded_point(false);
+        let pub_key_x = U256::from_be_bytes((*pub_key.x().unwrap()).into());
+        let pub_key_y = U256::from_be_bytes((*pub_key.y().unwrap()).into());
+
+        if let Some(label) = label {
+            state.labels.insert(addr, label.into());
+        }
+
+        Ok(Wallet { addr, publicKeyX: pub_key_x, publicKeyY: pub_key_y, privateKey: *private_key }
+            .abi_encode())
+    }
 }
 
 fn encode_full_sig(sig: alloy_primitives::PrimitiveSignature) -> Vec<u8> {
@@ -237,7 +281,18 @@ fn sign(private_key: &U256, digest: &B256) -> Result<alloy_primitives::Primitive
     // The `ecrecover` precompile does not use EIP-155. No chain ID is needed.
     let wallet = parse_wallet(private_key)?;
     let sig = wallet.sign_hash_sync(digest)?;
+    #[cfg(not(feature = "sm"))]
     debug_assert_eq!(sig.recover_address_from_prehash(digest)?, wallet.address());
+    #[cfg(feature = "sm")]
+    {
+        let sm_sig = SmSignature::from_bytes(&sig.as_bytes()).unwrap();
+        debug_assert_eq!(
+            alloy_signer_sm::public_key_to_address(
+                &SmVerifyingKey::recover_from_prehash(digest.as_slice(), &sm_sig).unwrap()
+            ),
+            wallet.address()
+        );
+    }
     Ok(sig)
 }
 
@@ -304,8 +359,20 @@ fn parse_private_key_p256(private_key: &U256) -> Result<P256SigningKey> {
     Ok(P256SigningKey::from_bytes((&private_key.to_be_bytes()).into())?)
 }
 
+#[cfg(feature = "sm")]
+fn parse_private_key_sm2(private_key: &U256) -> Result<SmSigningKey> {
+    validate_private_key::<alloy_signer_sm::Sm2>(private_key)?;
+    Ok(SmSigningKey::from_bytes((&private_key.to_be_bytes()).into())?)
+}
+
+#[cfg(not(feature = "sm"))]
 pub(super) fn parse_wallet(private_key: &U256) -> Result<PrivateKeySigner> {
     parse_private_key(private_key).map(PrivateKeySigner::from)
+}
+
+#[cfg(feature = "sm")]
+pub(super) fn parse_wallet(private_key: &U256) -> Result<SmSigner> {
+    parse_private_key_sm2(private_key).map(SmSigner::from)
 }
 
 fn derive_key_str(mnemonic: &str, path: &str, index: u32, language: &str) -> Result {

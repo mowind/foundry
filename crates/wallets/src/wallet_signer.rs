@@ -23,6 +23,9 @@ use {
     },
 };
 
+#[cfg(feature = "sm")]
+use alloy_signer_sm::SmSigner;
+
 pub type Result<T> = std::result::Result<T, WalletSignerError>;
 
 /// Wrapper enum around different signers.
@@ -40,6 +43,9 @@ pub enum WalletSigner {
     /// Wrapper around Google Cloud KMS signer.
     #[cfg(feature = "gcp-kms")]
     Gcp(GcpSigner),
+    /// Wrapper around sm2.
+    #[cfg(feature = "sm")]
+    Sm(SmSigner),
 }
 
 impl WalletSigner {
@@ -107,7 +113,14 @@ impl WalletSigner {
     }
 
     pub fn from_private_key(private_key: &B256) -> Result<Self> {
-        Ok(Self::Local(PrivateKeySigner::from_bytes(private_key)?))
+        #[cfg(not(feature = "sm"))]
+        {
+            Ok(Self::Local(PrivateKeySigner::from_bytes(private_key)?))
+        }
+        #[cfg(feature = "sm")]
+        {
+            Ok(Self::Sm(SmSigner::from_bytes(private_key)?))
+        }
     }
 
     /// Returns a list of addresses available to use with current signer
@@ -155,6 +168,8 @@ impl WalletSigner {
             Self::Gcp(gcp) => {
                 senders.push(alloy_signer::Signer::address(gcp));
             }
+            #[cfg(feature = "sm")]
+            Self::Sm(sm) => senders.push(alloy_signer::Signer::address(sm)),
         }
         Ok(senders)
     }
@@ -191,6 +206,8 @@ macro_rules! delegate {
             Self::Aws($inner) => $e,
             #[cfg(feature = "gcp-kms")]
             Self::Gcp($inner) => $e,
+            #[cfg(feature = "sm")]
+            Self::Sm($inner) => $e,
         }
     };
 }
@@ -263,16 +280,32 @@ impl PendingSigner {
         match self {
             Self::Keystore(path) => {
                 let password = rpassword::prompt_password("Enter keystore password:")?;
-                match PrivateKeySigner::decrypt_keystore(path, password) {
-                    Ok(signer) => Ok(WalletSigner::Local(signer)),
-                    Err(e) => match e {
-                        // Catch the `MacMismatch` error, which indicates an incorrect password and
-                        // return a more user-friendly `IncorrectKeystorePassword`.
-                        alloy_signer_local::LocalSignerError::EthKeystoreError(
-                            eth_keystore::KeystoreError::MacMismatch,
-                        ) => Err(WalletSignerError::IncorrectKeystorePassword),
-                        _ => Err(WalletSignerError::Local(e)),
-                    },
+                #[cfg(not(feature = "sm"))]
+                {
+                    match PrivateKeySigner::decrypt_keystore(path, password) {
+                        Ok(signer) => Ok(WalletSigner::Local(signer)),
+                        Err(e) => match e {
+                            // Catch the `MacMismatch` error, which indicates an incorrect password
+                            // and return a more user-friendly
+                            // `IncorrectKeystorePassword`.
+                            alloy_signer_local::LocalSignerError::EthKeystoreError(
+                                eth_keystore::KeystoreError::MacMismatch,
+                            ) => Err(WalletSignerError::IncorrectKeystorePassword),
+                            _ => Err(WalletSignerError::Local(e)),
+                        },
+                    }
+                }
+                #[cfg(feature = "sm")]
+                {
+                    match SmSigner::decrypt_keystore(path, password) {
+                        Ok(signer) => Ok(WalletSigner::Sm(signer)),
+                        Err(e) => match e {
+                            alloy_signer_sm::SmSignerError::EthKeystoreError(
+                                eth_keystore::KeystoreError::MacMismatch,
+                            ) => Err(WalletSignerError::IncorrectKeystorePassword),
+                            _ => Err(WalletSignerError::Sm(e)),
+                        },
+                    }
                 }
             }
             Self::Interactive => {

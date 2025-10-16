@@ -64,3 +64,6 @@ url.workspace = true
 
 [dev-dependencies]
 foundry-test-utils.workspace = true
+
+[features]
+sm = ["revm/sm", "alloy-primitives/sm"]
