@@ -1197,7 +1197,8 @@ impl NodeConfig {
         self.apply_tempo_fork_beneficiary_default(&mut evm_env);
 
         let genesis_timestamp = self.get_genesis_timestamp();
-        let base_fee_params: BaseFeeParams = self.networks.base_fee_params(genesis_timestamp);
+        let base_fee_params: BaseFeeParams =
+            self.networks.resolve().base_fee_params(genesis_timestamp);
 
         // On Tempo, the base fee follows the chain's hardfork rules instead of EIP-1559.
         let tempo_hardfork =
@@ -1252,6 +1253,8 @@ impl NodeConfig {
 
         self.apply_tempo_fork_beneficiary_default(&mut evm_env);
 
+        let network_profile = self.networks.resolve();
+
         let genesis = GenesisConfig {
             number: self.get_genesis_number(),
             timestamp: genesis_timestamp,
@@ -1261,7 +1264,7 @@ impl NodeConfig {
         };
 
         let mut decoder_builder = CallTraceDecoderBuilder::new().with_tempo_hardfork(
-            self.networks.is_tempo().then(|| TempoHardfork::from(self.get_hardfork())),
+            network_profile.is_tempo().then(|| TempoHardfork::from(self.get_hardfork())),
         );
         if self.print_traces {
             // if traces should get printed we configure the decoder with the signatures cache
@@ -1275,7 +1278,7 @@ impl NodeConfig {
         let backend = mem::Backend::with_genesis(
             db,
             Arc::new(RwLock::new(evm_env)),
-            self.networks,
+            network_profile,
             genesis,
             fees,
             Arc::new(RwLock::new(fork)),
@@ -1508,7 +1511,7 @@ latest block number: {latest_block}"
         apply_chain_and_block_specific_env_changes::<AnyNetwork, _, _>(
             evm_env,
             &block,
-            self.networks,
+            self.networks.resolve(),
         );
 
         let meta = BlockchainDbMeta::new(cache_block_env, eth_rpc_url.clone());

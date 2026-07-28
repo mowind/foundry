@@ -10,12 +10,12 @@ use alloy_chains::{
     NamedChain::{Chiado, Gnosis, Moonbase, Moonbeam, MoonbeamDev, Moonriver, Rsk, RskTestnet},
 };
 use alloy_eips::eip1559::BaseFeeParams;
-use alloy_evm::precompiles::{DynPrecompile, PrecompilesMap};
+use alloy_evm::precompiles::{DynPrecompile, Precompile, PrecompilesMap};
 use alloy_primitives::{Address, ChainId, address, map::AddressHashMap};
 use clap::Parser;
 use foundry_evm_hardforks::{FoundryHardfork, TempoHardfork};
 use revm::precompile::{
-    Precompile as RevmPrecompile,
+    Precompile as RevmPrecompile, PrecompileId,
     secp256r1::{P256VERIFY, P256VERIFY_OSAKA},
 };
 use serde::{Deserialize, Serialize};
@@ -208,6 +208,299 @@ impl From<ChainId> for NetworkVariant {
     }
 }
 
+/// The base EVM semantics selected for a resolved network profile.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EvmFamily {
+    /// Canonical Ethereum execution semantics.
+    #[default]
+    Ethereum,
+    /// OP Stack execution semantics.
+    #[cfg(feature = "optimism")]
+    Optimism,
+    /// Tempo execution semantics.
+    Tempo,
+}
+
+impl EvmFamily {
+    /// Returns the family name.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Ethereum => "ethereum",
+            #[cfg(feature = "optimism")]
+            Self::Optimism => "optimism",
+            Self::Tempo => "tempo",
+        }
+    }
+}
+
+/// The minimum runtime facts needed to project network-specific EVM semantics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetworkExecutionContext {
+    /// Chain ID of the executing EVM.
+    pub chain_id: ChainId,
+    /// Timestamp fixed when the EVM is created.
+    pub timestamp: u64,
+}
+
+impl NetworkExecutionContext {
+    /// Creates a new execution context.
+    pub const fn new(chain_id: ChainId, timestamp: u64) -> Self {
+        Self { chain_id, timestamp }
+    }
+}
+
+/// State preparation selected by a resolved network profile.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NetworkStatePlan {
+    /// No profile-owned state preparation is required.
+    #[default]
+    None,
+    /// Apply the existing Tempo state preparation path.
+    Tempo,
+}
+
+/// Error returned when two network extensions claim the same singleton precompile address.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrecompileCompositionError {
+    profile: &'static str,
+    address: Address,
+    existing: PrecompileId,
+    requested: Option<PrecompileId>,
+}
+
+impl PrecompileCompositionError {
+    /// Returns the profile that failed composition.
+    pub const fn profile(&self) -> &'static str {
+        self.profile
+    }
+
+    /// Returns the conflicting singleton address.
+    pub const fn address(&self) -> Address {
+        self.address
+    }
+
+    /// Returns the precompile already installed at the address.
+    pub const fn existing(&self) -> &PrecompileId {
+        &self.existing
+    }
+
+    /// Returns the precompile the profile requested, or `None` for removal.
+    pub const fn requested(&self) -> Option<&PrecompileId> {
+        self.requested.as_ref()
+    }
+}
+
+impl std::fmt::Display for PrecompileCompositionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "network profile `{}` cannot compose precompile at {}: existing `{}` conflicts with ",
+            self.profile,
+            self.address,
+            self.existing.name(),
+        )?;
+        if let Some(requested) = &self.requested {
+            write!(f, "`{}`", requested.name())
+        } else {
+            f.write_str("removal")
+        }
+    }
+}
+
+impl std::error::Error for PrecompileCompositionError {}
+
+/// Immutable runtime network semantics resolved from user configuration.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResolvedNetworkProfile {
+    family: EvmFamily,
+    celo: bool,
+    bypass_prevrandao: bool,
+}
+
+impl ResolvedNetworkProfile {
+    /// Returns the selected EVM family.
+    pub const fn evm_family(self) -> EvmFamily {
+        self.family
+    }
+
+    /// Returns the resolved profile name.
+    pub const fn name(self) -> &'static str {
+        if self.celo { "celo" } else { self.family.name() }
+    }
+
+    /// Returns whether the Celo extension is enabled.
+    pub const fn is_celo(self) -> bool {
+        self.celo
+    }
+
+    /// Returns whether Tempo semantics are selected.
+    pub const fn is_tempo(self) -> bool {
+        matches!(self.family, EvmFamily::Tempo)
+    }
+
+    /// Returns whether Optimism semantics are selected.
+    #[cfg(feature = "optimism")]
+    pub const fn is_optimism(self) -> bool {
+        matches!(self.family, EvmFamily::Optimism)
+    }
+
+    /// Returns the state preparation plan for this profile.
+    pub const fn state_plan(self) -> NetworkStatePlan {
+        if self.is_tempo() { NetworkStatePlan::Tempo } else { NetworkStatePlan::None }
+    }
+
+    /// Returns the base fee parameters for this profile.
+    #[cfg(feature = "optimism")]
+    pub fn base_fee_params(self, timestamp: u64) -> BaseFeeParams {
+        if self.is_optimism() {
+            let op_hardforks = alloy_op_hardforks::OpChainHardforks::op_mainnet();
+            if alloy_op_hardforks::OpHardforks::is_canyon_active_at_timestamp(
+                &op_hardforks,
+                timestamp,
+            ) {
+                return BaseFeeParams::optimism_canyon();
+            }
+            return BaseFeeParams::optimism();
+        }
+        BaseFeeParams::ethereum()
+    }
+
+    /// Returns the base fee parameters for this profile.
+    #[cfg(not(feature = "optimism"))]
+    pub const fn base_fee_params(self, timestamp: u64) -> BaseFeeParams {
+        let _ = (self, timestamp);
+        BaseFeeParams::ethereum()
+    }
+
+    /// Returns whether prevrandao should be bypassed for the executing chain.
+    pub fn bypass_prevrandao(self, chain_id: u64) -> bool {
+        if let Ok(
+            Moonbeam | Moonbase | Moonriver | MoonbeamDev | Rsk | RskTestnet | Gnosis | Chiado,
+        ) = NamedChain::try_from(chain_id)
+        {
+            return true;
+        }
+        self.bypass_prevrandao
+    }
+
+    /// Composes all profile and chain-specific precompiles for one EVM creation.
+    pub fn inject_precompiles(
+        self,
+        precompiles: &mut PrecompilesMap,
+        context: NetworkExecutionContext,
+    ) -> Result<(), PrecompileCompositionError> {
+        let p256verify = bsc_p256_precompile(context.chain_id, context.timestamp);
+
+        if self.celo {
+            self.ensure_compatible_precompile(
+                precompiles,
+                CELO_TRANSFER_ADDRESS,
+                &PRECOMPILE_ID_CELO_TRANSFER,
+                Some(&PRECOMPILE_ID_CELO_TRANSFER),
+            )?;
+        }
+        if p256verify.is_some() {
+            let requested = p256verify
+                .as_ref()
+                .and_then(|precompile| precompile.as_ref())
+                .map(RevmPrecompile::id);
+            self.ensure_compatible_precompile(
+                precompiles,
+                BSC_P256_ADDRESS,
+                P256VERIFY.id(),
+                requested,
+            )?;
+        }
+
+        if self.celo {
+            precompiles.apply_precompile(&CELO_TRANSFER_ADDRESS, move |_| {
+                Some(celo::transfer::precompile())
+            });
+        }
+        if let Some(p256verify) = p256verify {
+            precompiles.apply_precompile(&BSC_P256_ADDRESS, move |_| {
+                p256verify.map(|p256verify| {
+                    DynPrecompile::new(p256verify.id().clone(), move |input| {
+                        p256verify.execute(input.data, input.gas, input.reservoir)
+                    })
+                })
+            });
+        }
+
+        Ok(())
+    }
+
+    fn ensure_compatible_precompile(
+        self,
+        precompiles: &PrecompilesMap,
+        address: Address,
+        compatible: &PrecompileId,
+        requested: Option<&PrecompileId>,
+    ) -> Result<(), PrecompileCompositionError> {
+        let Some(existing) = precompiles.get(&address) else { return Ok(()) };
+        if existing.precompile_id() == compatible {
+            return Ok(());
+        }
+        Err(PrecompileCompositionError {
+            profile: self.name(),
+            address,
+            existing: existing.precompile_id().clone(),
+            requested: requested.cloned(),
+        })
+    }
+
+    /// Returns trace labels projected by this profile.
+    pub fn precompile_labels(
+        self,
+        tempo_hardfork: Option<TempoHardfork>,
+    ) -> AddressHashMap<String> {
+        let mut labels = AddressHashMap::default();
+        if self.celo {
+            labels.insert(CELO_TRANSFER_ADDRESS, CELO_TRANSFER_LABEL.to_string());
+        }
+        if self.is_tempo() {
+            labels.extend(
+                TEMPO_PRECOMPILES
+                    .iter()
+                    .copied()
+                    .filter(|(_, address)| {
+                        tempo_hardfork.is_none_or(|hardfork| {
+                            is_tempo_precompile_active_at(*address, hardfork)
+                        })
+                    })
+                    .map(|(label, address)| (address, label.to_string())),
+            );
+        }
+        labels
+    }
+
+    /// Returns the static precompile inventory projected by this profile.
+    pub fn precompile_inventory(
+        self,
+        tempo_hardfork: Option<TempoHardfork>,
+    ) -> BTreeMap<String, Address> {
+        let mut precompiles = BTreeMap::new();
+        if self.celo {
+            precompiles
+                .insert(PRECOMPILE_ID_CELO_TRANSFER.name().to_string(), CELO_TRANSFER_ADDRESS);
+        }
+        if self.is_tempo() {
+            precompiles.extend(
+                TEMPO_PRECOMPILES
+                    .iter()
+                    .copied()
+                    .filter(|(_, address)| {
+                        tempo_hardfork.is_none_or(|hardfork| {
+                            is_tempo_precompile_active_at(*address, hardfork)
+                        })
+                    })
+                    .map(|(label, address)| (label.to_string(), address)),
+            );
+        }
+        precompiles
+    }
+}
+
 #[derive(Clone, Debug, Default, Parser, Deserialize, Copy, PartialEq, Eq)]
 pub struct NetworkConfigs {
     /// Enable a specific network family.
@@ -271,6 +564,21 @@ impl NetworkConfigs {
         self.celo
     }
 
+    /// Resolves user configuration into immutable runtime network semantics.
+    pub const fn resolve(self) -> ResolvedNetworkProfile {
+        let family = match self.resolved_network() {
+            None | Some(NetworkVariant::Ethereum) => EvmFamily::Ethereum,
+            #[cfg(feature = "optimism")]
+            Some(NetworkVariant::Optimism) => EvmFamily::Optimism,
+            Some(NetworkVariant::Tempo) => EvmFamily::Tempo,
+        };
+        ResolvedNetworkProfile {
+            family,
+            celo: self.celo,
+            bypass_prevrandao: self.bypass_prevrandao,
+        }
+    }
+
     /// Returns the resolved network variant, folding legacy flags.
     pub const fn resolved_network(&self) -> Option<NetworkVariant> {
         if let Some(n) = self.network {
@@ -292,35 +600,6 @@ impl NetworkConfigs {
             NetworkVariant::Ethereum => None,
             _ => Some(n.name()),
         })
-    }
-
-    /// Returns the base fee parameters for the configured network.
-    ///
-    /// For Optimism networks, returns Canyon parameters if the Canyon hardfork is active
-    /// at the given timestamp, otherwise returns pre-Canyon parameters.
-    #[cfg(feature = "optimism")]
-    pub fn base_fee_params(&self, timestamp: u64) -> BaseFeeParams {
-        if self.is_optimism() {
-            return self.op_base_fee_params(timestamp);
-        }
-        BaseFeeParams::ethereum()
-    }
-
-    /// Returns the base fee parameters for the configured network.
-    #[cfg(not(feature = "optimism"))]
-    pub const fn base_fee_params(&self, timestamp: u64) -> BaseFeeParams {
-        let _ = timestamp;
-        BaseFeeParams::ethereum()
-    }
-
-    pub fn bypass_prevrandao(&self, chain_id: u64) -> bool {
-        if let Ok(
-            Moonbeam | Moonbase | Moonriver | MoonbeamDev | Rsk | RskTestnet | Gnosis | Chiado,
-        ) = NamedChain::try_from(chain_id)
-        {
-            return true;
-        }
-        self.bypass_prevrandao
     }
 
     pub fn with_chain_id(self, chain_id: u64) -> Self {
@@ -367,80 +646,6 @@ impl NetworkConfigs {
 
         Ok(network)
     }
-
-    /// Inject precompiles for configured networks.
-    pub fn inject_precompiles(self, precompiles: &mut PrecompilesMap) {
-        if self.celo {
-            precompiles.apply_precompile(&CELO_TRANSFER_ADDRESS, move |_| {
-                Some(celo::transfer::precompile())
-            });
-        }
-    }
-
-    /// Injects chain-specific precompiles active at the given timestamp.
-    pub fn inject_chain_precompiles(
-        self,
-        precompiles: &mut PrecompilesMap,
-        chain_id: ChainId,
-        timestamp: u64,
-    ) {
-        let Some(p256verify) = bsc_p256_precompile(chain_id, timestamp) else { return };
-        precompiles.apply_precompile(&BSC_P256_ADDRESS, move |_| {
-            p256verify.map(|p256verify| {
-                DynPrecompile::new(p256verify.id().clone(), move |input| {
-                    p256verify.execute(input.data, input.gas, input.reservoir)
-                })
-            })
-        });
-    }
-
-    /// Returns precompiles label for configured networks, to be used in traces.
-    pub fn precompiles_label(
-        self,
-        tempo_hardfork: Option<TempoHardfork>,
-    ) -> AddressHashMap<String> {
-        let mut labels = AddressHashMap::default();
-        if self.celo {
-            labels.insert(CELO_TRANSFER_ADDRESS, CELO_TRANSFER_LABEL.to_string());
-        }
-        if self.is_tempo() {
-            labels.extend(
-                TEMPO_PRECOMPILES
-                    .iter()
-                    .copied()
-                    .filter(|(_, address)| {
-                        tempo_hardfork.is_none_or(|hardfork| {
-                            is_tempo_precompile_active_at(*address, hardfork)
-                        })
-                    })
-                    .map(|(label, address)| (address, label.to_string())),
-            );
-        }
-        labels
-    }
-
-    /// Returns precompiles for configured networks.
-    pub fn precompiles(self, tempo_hardfork: Option<TempoHardfork>) -> BTreeMap<String, Address> {
-        let mut precompiles = BTreeMap::new();
-        if self.celo {
-            precompiles
-                .insert(PRECOMPILE_ID_CELO_TRANSFER.name().to_string(), CELO_TRANSFER_ADDRESS);
-        }
-        if self.is_tempo() {
-            precompiles.extend(
-                TEMPO_PRECOMPILES
-                    .iter()
-                    .copied()
-                    .filter(|(_, address)| {
-                        tempo_hardfork.is_none_or(|hardfork| {
-                            is_tempo_precompile_active_at(*address, hardfork)
-                        })
-                    })
-                    .map(|(label, address)| (label.to_string(), address)),
-            );
-        }
-        precompiles
-    }
 }
 
 impl From<NetworkVariant> for NetworkConfigs {
@@ -465,6 +670,10 @@ mod tests {
         Precompiles,
         secp256r1::{P256VERIFY_BASE_GAS_FEE, P256VERIFY_BASE_GAS_FEE_OSAKA},
     };
+    use std::borrow::Cow;
+
+    const DYNAMIC_PRECOMPILE_ADDRESS: Address =
+        address!("0000000000000000000000000000000000000bad");
 
     // --- Equivalence: new flag == legacy flag ---
 
@@ -489,8 +698,91 @@ mod tests {
         let via_old = NetworkConfigs { tempo: true, ..Default::default() };
         assert_eq!(via_new.is_tempo(), via_old.is_tempo());
         assert_eq!(via_new.active_network_name(), via_old.active_network_name());
-        assert_eq!(via_new.precompiles(None), via_old.precompiles(None));
-        assert_eq!(via_new.precompiles_label(None), via_old.precompiles_label(None));
+        assert_eq!(
+            via_new.resolve().precompile_inventory(None),
+            via_old.resolve().precompile_inventory(None)
+        );
+        assert_eq!(
+            via_new.resolve().precompile_labels(None),
+            via_old.resolve().precompile_labels(None)
+        );
+    }
+
+    #[test]
+    fn resolves_configuration_into_runtime_profile() {
+        let ethereum = NetworkConfigs::default().resolve();
+        assert_eq!(ethereum.evm_family(), EvmFamily::Ethereum);
+        assert_eq!(ethereum.state_plan(), NetworkStatePlan::None);
+
+        let celo = NetworkConfigs::with_celo().resolve();
+        assert_eq!(celo.evm_family(), EvmFamily::Ethereum);
+        assert!(celo.is_celo());
+        assert_eq!(
+            celo.precompile_inventory(None).get(PRECOMPILE_ID_CELO_TRANSFER.name()),
+            Some(&CELO_TRANSFER_ADDRESS)
+        );
+        assert_eq!(
+            celo.precompile_labels(None).get(&CELO_TRANSFER_ADDRESS),
+            Some(&CELO_TRANSFER_LABEL.to_string())
+        );
+
+        let tempo = NetworkConfigs::with_tempo().resolve();
+        assert_eq!(tempo.evm_family(), EvmFamily::Tempo);
+        assert_eq!(tempo.state_plan(), NetworkStatePlan::Tempo);
+
+        #[cfg(feature = "optimism")]
+        assert_eq!(NetworkConfigs::with_optimism().resolve().evm_family(), EvmFamily::Optimism);
+    }
+
+    #[test]
+    fn profile_precompile_composition_preserves_dynamic_lookup() {
+        let dynamic_id = PrecompileId::Custom(Cow::Borrowed("dynamic-test"));
+        let mut precompiles = PrecompilesMap::from_static(Precompiles::prague());
+        precompiles.set_precompile_lookup({
+            let dynamic_id = dynamic_id.clone();
+            move |address: &Address| {
+                (*address == DYNAMIC_PRECOMPILE_ADDRESS).then(|| {
+                    DynPrecompile::new(dynamic_id.clone(), |_| unreachable!("not executed"))
+                })
+            }
+        });
+
+        NetworkConfigs::with_celo()
+            .resolve()
+            .inject_precompiles(&mut precompiles, NetworkExecutionContext::new(1, 0))
+            .unwrap();
+
+        assert_eq!(
+            precompiles.get(&DYNAMIC_PRECOMPILE_ADDRESS).unwrap().precompile_id(),
+            &dynamic_id
+        );
+        assert_eq!(
+            precompiles.get(&CELO_TRANSFER_ADDRESS).unwrap().precompile_id(),
+            &PRECOMPILE_ID_CELO_TRANSFER
+        );
+    }
+
+    #[test]
+    fn profile_precompile_composition_rejects_singleton_conflict() {
+        let conflicting_id = PrecompileId::Custom(Cow::Borrowed("conflicting-test"));
+        let mut precompiles = PrecompilesMap::from_static(Precompiles::prague());
+        precompiles.apply_precompile(&CELO_TRANSFER_ADDRESS, {
+            let conflicting_id = conflicting_id.clone();
+            move |_| Some(DynPrecompile::new(conflicting_id, |_| unreachable!("not executed")))
+        });
+
+        let err = NetworkConfigs::with_celo()
+            .resolve()
+            .inject_precompiles(&mut precompiles, NetworkExecutionContext::new(1, 0))
+            .unwrap_err();
+
+        assert_eq!(err.address(), CELO_TRANSFER_ADDRESS);
+        assert_eq!(err.existing(), &conflicting_id);
+        assert_eq!(err.requested(), Some(&PRECOMPILE_ID_CELO_TRANSFER));
+        assert_eq!(
+            precompiles.get(&CELO_TRANSFER_ADDRESS).unwrap().precompile_id(),
+            &conflicting_id
+        );
     }
 
     fn bsc_p256_gas_used(chain_id: ChainId, timestamp: u64) -> Option<u64> {
@@ -531,45 +823,64 @@ mod tests {
     fn removes_bsc_p256_before_haber() {
         let mut precompiles = PrecompilesMap::from_static(Precompiles::osaka());
         assert!(precompiles.get(&BSC_P256_ADDRESS).is_some());
-        NetworkConfigs::default().inject_chain_precompiles(
-            &mut precompiles,
-            BSC_MAINNET_CHAIN_ID,
-            BSC_MAINNET_HABER_TIMESTAMP - 1,
-        );
+        NetworkConfigs::default()
+            .resolve()
+            .inject_precompiles(
+                &mut precompiles,
+                NetworkExecutionContext::new(BSC_MAINNET_CHAIN_ID, BSC_MAINNET_HABER_TIMESTAMP - 1),
+            )
+            .unwrap();
         assert!(precompiles.get(&BSC_P256_ADDRESS).is_none());
     }
 
     #[test]
     fn canonical_tempo_network_reports_precompiles() {
-        let cfg = NetworkConfigs { network: Some(NetworkVariant::Tempo), ..Default::default() };
+        let profile =
+            NetworkConfigs { network: Some(NetworkVariant::Tempo), ..Default::default() }.resolve();
 
         assert_eq!(
-            cfg.precompiles(None).get("TIP20ChannelReserve"),
+            profile.precompile_inventory(None).get("TIP20ChannelReserve"),
             Some(&TIP20_CHANNEL_RESERVE_ADDRESS)
         );
-        assert!(!cfg.precompiles(Some(TempoHardfork::T4)).contains_key("TIP20ChannelReserve"));
-        assert!(!cfg.precompiles(Some(TempoHardfork::T4)).contains_key("ReceivePolicyGuard"));
-        assert!(!cfg.precompiles(Some(TempoHardfork::T2)).contains_key("AddressRegistry"));
-        assert!(!cfg.precompiles(Some(TempoHardfork::T2)).contains_key("SignatureVerifier"));
+        assert!(
+            !profile
+                .precompile_inventory(Some(TempoHardfork::T4))
+                .contains_key("TIP20ChannelReserve")
+        );
+        assert!(
+            !profile
+                .precompile_inventory(Some(TempoHardfork::T4))
+                .contains_key("ReceivePolicyGuard")
+        );
+        assert!(
+            !profile.precompile_inventory(Some(TempoHardfork::T2)).contains_key("AddressRegistry")
+        );
+        assert!(
+            !profile
+                .precompile_inventory(Some(TempoHardfork::T2))
+                .contains_key("SignatureVerifier")
+        );
         assert_eq!(
-            cfg.precompiles(Some(TempoHardfork::T3)).get("AddressRegistry"),
+            profile.precompile_inventory(Some(TempoHardfork::T3)).get("AddressRegistry"),
             Some(&ADDRESS_REGISTRY_ADDRESS)
         );
         assert_eq!(
-            cfg.precompiles(Some(TempoHardfork::T3)).get("SignatureVerifier"),
+            profile.precompile_inventory(Some(TempoHardfork::T3)).get("SignatureVerifier"),
             Some(&SIGNATURE_VERIFIER_ADDRESS)
         );
         assert_eq!(
-            cfg.precompiles_label(Some(TempoHardfork::T5)).get(&TIP20_CHANNEL_RESERVE_ADDRESS),
+            profile.precompile_labels(Some(TempoHardfork::T5)).get(&TIP20_CHANNEL_RESERVE_ADDRESS),
             Some(&"TIP20ChannelReserve".to_string())
         );
-        assert!(cfg.precompiles_label(None).contains_key(&TIP20_CHANNEL_RESERVE_ADDRESS));
+        assert!(profile.precompile_labels(None).contains_key(&TIP20_CHANNEL_RESERVE_ADDRESS));
         assert!(
-            !cfg.precompiles_label(Some(TempoHardfork::T5))
+            !profile
+                .precompile_labels(Some(TempoHardfork::T5))
                 .contains_key(&RECEIVE_POLICY_GUARD_ADDRESS)
         );
         assert!(
-            cfg.precompiles_label(Some(TempoHardfork::T6))
+            profile
+                .precompile_labels(Some(TempoHardfork::T6))
                 .contains_key(&RECEIVE_POLICY_GUARD_ADDRESS)
         );
     }
@@ -581,9 +892,14 @@ mod tests {
         assert!(TEMPO_PRECOMPILE_ADDRESSES.contains(&STORAGE_CREDITS_ADDRESS));
 
         // The hardfork-filtered precompile map must honor the same T7 activation.
-        let cfg = NetworkConfigs { network: Some(NetworkVariant::Tempo), ..Default::default() };
-        assert!(!cfg.precompiles(Some(TempoHardfork::T6)).contains_key("StorageCredits"));
-        assert!(cfg.precompiles(Some(TempoHardfork::T7)).contains_key("StorageCredits"));
+        let profile =
+            NetworkConfigs { network: Some(NetworkVariant::Tempo), ..Default::default() }.resolve();
+        assert!(
+            !profile.precompile_inventory(Some(TempoHardfork::T6)).contains_key("StorageCredits")
+        );
+        assert!(
+            profile.precompile_inventory(Some(TempoHardfork::T7)).contains_key("StorageCredits")
+        );
     }
 
     #[test]
@@ -592,9 +908,14 @@ mod tests {
         assert!(is_tempo_precompile_active_at(CURRENT_COMMITTEE_ADDRESS, TempoHardfork::T8));
         assert!(TEMPO_PRECOMPILE_ADDRESSES.contains(&CURRENT_COMMITTEE_ADDRESS));
 
-        let cfg = NetworkConfigs { network: Some(NetworkVariant::Tempo), ..Default::default() };
-        assert!(!cfg.precompiles(Some(TempoHardfork::T7)).contains_key("CurrentCommittee"));
-        assert!(cfg.precompiles(Some(TempoHardfork::T8)).contains_key("CurrentCommittee"));
+        let profile =
+            NetworkConfigs { network: Some(NetworkVariant::Tempo), ..Default::default() }.resolve();
+        assert!(
+            !profile.precompile_inventory(Some(TempoHardfork::T7)).contains_key("CurrentCommittee")
+        );
+        assert!(
+            profile.precompile_inventory(Some(TempoHardfork::T8)).contains_key("CurrentCommittee")
+        );
     }
 
     // --- resolved() / active_network_name ---

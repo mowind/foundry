@@ -55,23 +55,32 @@ pub async fn run_command(args: Chisel) -> Result<()> {
     }
     evm_opts.infer_network_from_fork().await;
     config.networks = evm_opts.networks;
+    let network_profile = evm_opts.networks.resolve();
 
-    if evm_opts.networks.is_tempo() {
-        return run_command_with_network::<TempoEvmNetwork>(args, config, evm_opts).await;
+    if network_profile.is_tempo() {
+        return run_command_with_network::<TempoEvmNetwork>(
+            args,
+            config,
+            evm_opts,
+            network_profile,
+        )
+        .await;
     }
 
     #[cfg(feature = "optimism")]
-    if evm_opts.networks.is_optimism() {
-        return run_command_with_network::<OpEvmNetwork>(args, config, evm_opts).await;
+    if network_profile.is_optimism() {
+        return run_command_with_network::<OpEvmNetwork>(args, config, evm_opts, network_profile)
+            .await;
     }
 
-    run_command_with_network::<EthEvmNetwork>(args, config, evm_opts).await
+    run_command_with_network::<EthEvmNetwork>(args, config, evm_opts, network_profile).await
 }
 
 async fn run_command_with_network<FEN: FoundryEvmNetwork>(
     args: Chisel,
     config: Config,
     evm_opts: EvmOpts,
+    network_profile: foundry_evm_networks::ResolvedNetworkProfile,
 ) -> Result<()> {
     // Create a new cli dispatcher
     let mut dispatcher = ChiselDispatcher::<FEN>::new(crate::source::SessionSourceConfig {
@@ -80,6 +89,7 @@ async fn run_command_with_network<FEN: FoundryEvmNetwork>(
         foundry_config: config,
         no_vm: args.no_vm,
         evm_opts,
+        network_profile,
         backend: None,
         calldata: None,
         ir_minimum: args.ir_minimum,

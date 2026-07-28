@@ -163,7 +163,7 @@ impl<FEN: FoundryEvmNetwork> ChiselDispatcher<FEN> {
         // known_contracts: &ContractsByArtifact,
     ) -> eyre::Result<CallTraceDecoder> {
         let chain_id = session_config.evm_opts.get_remote_chain_id().await;
-        let is_tempo = session_config.evm_opts.networks.is_tempo()
+        let is_tempo = session_config.network_profile.is_tempo()
             || chain_id.as_ref().is_some_and(|chain| chain.is_tempo());
 
         let mut decoder = CallTraceDecoderBuilder::new()
@@ -320,7 +320,7 @@ impl<FEN: FoundryEvmNetwork> ChiselDispatcher<FEN> {
             sh_println!("{}", "Saved current session!".green())?;
         }
 
-        let new_session = match id {
+        let mut new_session = match id {
             "latest" => ChiselSession::<FEN>::latest(),
             id => ChiselSession::<FEN>::load(id),
         }
@@ -331,6 +331,8 @@ impl<FEN: FoundryEvmNetwork> ChiselDispatcher<FEN> {
             &new_session.source.config.foundry_config,
             id,
         )?;
+        new_session.source.config.network_profile =
+            new_session.source.config.foundry_config.networks.resolve();
         new_session.source.build()?;
         self.session = new_session;
         sh_println!("Loaded Chisel session! (ID = {})", self.session.id.as_ref().unwrap())

@@ -216,6 +216,7 @@ impl<FEN: FoundryEvmNetwork> SessionSource<FEN> {
                     .logs(self.config.foundry_config.live_logs)
                     .chisel_state(final_pc)
                     .trace_requirements(TraceRequirements::none().with_calls(true))
+                    .network_profile(self.config.network_profile)
                     .cheatcodes(
                         CheatsConfig::new(
                             &self.config.foundry_config,

@@ -122,7 +122,9 @@ use foundry_evm::{
         get_blob_params_by_spec_id,
     },
 };
-use foundry_evm_networks::{NetworkConfigs, arbitrum};
+use foundry_evm_networks::{
+    NetworkExecutionContext, NetworkStatePlan, ResolvedNetworkProfile, arbitrum,
+};
 #[cfg(feature = "optimism")]
 use foundry_primitives::get_deposit_tx_parts;
 use foundry_primitives::{
@@ -311,8 +313,8 @@ pub struct Backend<N: Network> {
     states: Arc<RwLock<InMemoryBlockStates>>,
     /// EVM environment data of the chain (block env, cfg env).
     evm_env: Arc<RwLock<EvmEnv>>,
-    /// Network configuration (optimism, custom precompiles, etc.)
-    networks: NetworkConfigs,
+    /// Immutable runtime network profile.
+    network_profile: ResolvedNetworkProfile,
     /// The active hardfork.
     hardfork: FoundryHardfork,
     /// This is set if this is currently forked off another client.
@@ -357,7 +359,7 @@ impl<N: Network> Clone for Backend<N> {
             blockchain: self.blockchain.clone(),
             states: self.states.clone(),
             evm_env: self.evm_env.clone(),
-            networks: self.networks,
+            network_profile: self.network_profile,
             hardfork: self.hardfork,
             fork: self.fork.clone(),
             time: self.time.clone(),
@@ -591,7 +593,7 @@ impl<N: Network> Backend<N> {
     /// Returns true if op-stack deposits are active
     #[cfg(feature = "optimism")]
     pub const fn is_optimism(&self) -> bool {
-        self.networks.is_optimism()
+        self.network_profile.is_optimism()
     }
 
     /// Returns true if op-stack deposits are active.
@@ -604,7 +606,7 @@ impl<N: Network> Backend<N> {
 
     /// Returns true if Tempo network mode is active
     pub const fn is_tempo(&self) -> bool {
-        self.networks.is_tempo()
+        self.network_profile.is_tempo()
     }
 
     /// Returns the active hardfork.
@@ -636,7 +638,12 @@ impl<N: Network> Backend<N> {
             let evm_env = self.evm_env.read();
             (evm_env.cfg_env.chain_id, evm_env.block_env.timestamp.saturating_to())
         };
-        self.networks.inject_chain_precompiles(&mut precompiles, chain_id, timestamp);
+        if let Some(factory) = &self.precompile_factory {
+            factory.install(&mut precompiles);
+        }
+        self.network_profile
+            .inject_precompiles(&mut precompiles, NetworkExecutionContext::new(chain_id, timestamp))
+            .expect("resolved network profile precompile composition must be compatible");
 
         let mut precompiles_map = BTreeMap::<String, Address>::default();
         for address in precompiles.addresses() {
@@ -645,14 +652,10 @@ impl<N: Network> Backend<N> {
         }
 
         // Extend with configured network precompiles.
-        precompiles_map
-            .extend(self.networks.precompiles(self.is_tempo().then(|| self.tempo_hardfork())));
-
-        if let Some(factory) = &self.precompile_factory {
-            for (address, precompile) in factory.precompiles() {
-                precompiles_map.insert(precompile.precompile_id().to_string(), address);
-            }
-        }
+        precompiles_map.extend(
+            self.network_profile
+                .precompile_inventory(self.is_tempo().then(|| self.tempo_hardfork())),
+        );
 
         precompiles_map
     }
@@ -1255,21 +1258,24 @@ impl<N: Network> Backend<N> {
     /// Injects all configured precompiles into the given precompile map.
     ///
     /// This applies four layers:
-    /// 1. Network-specific precompiles (e.g. Tempo, OP)
-    /// 2. Chain- and timestamp-specific precompiles
-    /// 3. User-provided precompiles via [`PrecompileFactory`]
-    /// 4. Cheatcode ecrecover overrides (if active)
+    /// 1. User-provided precompiles via [`PrecompileFactory`].
+    /// 2. Profile and chain-specific precompiles, rejecting singleton collisions.
+    /// 3. Family-specific precompiles (e.g. Tempo, OP) at the caller.
+    /// 4. Cheatcode ecrecover overrides (if active).
     fn inject_precompiles(&self, precompiles: &mut PrecompilesMap, evm_env: &EvmEnv) {
-        self.networks.inject_precompiles(precompiles);
-        self.networks.inject_chain_precompiles(
-            precompiles,
-            evm_env.cfg_env.chain_id,
-            evm_env.block_env.timestamp.saturating_to(),
-        );
-
         if let Some(factory) = &self.precompile_factory {
             factory.install(precompiles);
         }
+
+        self.network_profile
+            .inject_precompiles(
+                precompiles,
+                NetworkExecutionContext::new(
+                    evm_env.cfg_env.chain_id,
+                    evm_env.block_env.timestamp.saturating_to(),
+                ),
+            )
+            .expect("resolved network profile precompile composition must be compatible");
 
         let cheats = Arc::new(self.cheats.clone());
         if cheats.has_recover_overrides() {
@@ -2398,7 +2404,7 @@ impl<N: Network> Backend<N> {
     pub async fn with_genesis(
         db: Arc<AsyncRwLock<Box<dyn Db>>>,
         env: Arc<RwLock<EvmEnv>>,
-        networks: NetworkConfigs,
+        network_profile: ResolvedNetworkProfile,
         genesis: GenesisConfig,
         fees: FeeManager,
         fork: Arc<RwLock<Option<ClientFork>>>,
@@ -2423,7 +2429,7 @@ impl<N: Network> Backend<N> {
                 fees.is_eip1559().then(|| fees.base_fee()),
                 genesis.timestamp,
                 genesis.number,
-                networks.is_tempo(),
+                network_profile.is_tempo(),
             )
         };
 
@@ -2487,7 +2493,7 @@ impl<N: Network> Backend<N> {
             blockchain,
             states: Arc::new(RwLock::new(states)),
             evm_env: env,
-            networks,
+            network_profile,
             hardfork,
             fork,
             time: TimeManager::new(start_timestamp),
@@ -2573,7 +2579,7 @@ impl<N: Network> Backend<N> {
 
         // Initialize Tempo precompiles and fee tokens when in Tempo mode (not in fork mode).
         // In fork mode, precompiles are inherited from the forked origin.
-        if self.networks.is_tempo() && !self.is_fork() {
+        if self.network_profile.state_plan() == NetworkStatePlan::Tempo && !self.is_fork() {
             let chain_id = self.evm_env.read().cfg_env.chain_id;
             let timestamp = self.genesis.timestamp;
             let test_accounts: Vec<Address> = self.genesis.accounts.clone();

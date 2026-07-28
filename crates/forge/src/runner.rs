@@ -777,7 +777,7 @@ impl<'a, FEN: FoundryEvmNetwork> ContractRunner<'a, FEN> {
                 // factory is usable only when it already exists in fork state. Tempo also
                 // provides the factory as a predeploy, which must not be deployed again.
                 if deployer == foundry_evm::constants::DEFAULT_CREATE2_DEPLOYER
-                    && !self.evm_opts.networks.is_tempo()
+                    && !self.mcr.network_profile.is_tempo()
                 {
                     self.executor.deploy_create2_deployer()?;
                 }
@@ -889,7 +889,7 @@ impl<'a, FEN: FoundryEvmNetwork> ContractRunner<'a, FEN> {
         self.executor.set_balance(LIBRARY_DEPLOYER, self.initial_balance())?;
 
         if matches!(self.mcr.library_deployment, LibraryDeployment::Nonce)
-            && !self.evm_opts.networks.is_tempo()
+            && !self.mcr.network_profile.is_tempo()
         {
             self.executor.deploy_create2_deployer()?;
         }

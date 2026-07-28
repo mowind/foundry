@@ -32,7 +32,7 @@ use foundry_evm::{
     traces::TraceRequirements,
     utils::{apply_chain_and_block_specific_env_changes, block_env_from_header},
 };
-use foundry_evm_networks::NetworkConfigs;
+use foundry_evm_networks::ResolvedNetworkProfile;
 use reqwest::Url;
 use revm::{bytecode::Bytecode, context::Block as _, database::Database};
 use semver::{BuildMetadata, Version};
@@ -328,14 +328,18 @@ where
 pub fn configure_env_block<FEN>(
     evm_env: &mut EvmEnvFor<FEN>,
     block: &BlockResponseFor<FEN>,
-    config: NetworkConfigs,
+    network_profile: ResolvedNetworkProfile,
 ) where
     FEN: FoundryEvmNetwork,
 {
     let number = evm_env.block_env.number();
     evm_env.block_env = block_env_from_header::<BlockEnvFor<FEN>>(block.header());
     evm_env.block_env.set_number(number);
-    apply_chain_and_block_specific_env_changes::<FEN::Network, _, _>(evm_env, block, config);
+    apply_chain_and_block_specific_env_changes::<FEN::Network, _, _>(
+        evm_env,
+        block,
+        network_profile,
+    );
 }
 
 pub fn deploy_contract<FEN>(

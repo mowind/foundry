@@ -11,7 +11,7 @@ use foundry_evm_core::{
     opts::EvmOpts,
 };
 use foundry_evm_hardforks::TempoHardfork;
-use foundry_evm_networks::NetworkConfigs;
+use foundry_evm_networks::ResolvedNetworkProfile;
 use foundry_evm_traces::TraceRequirements;
 use revm::{context::Transaction, state::Bytecode};
 use std::ops::{Deref, DerefMut};
@@ -27,7 +27,7 @@ impl<FEN: FoundryEvmNetwork> TracingExecutor<FEN> {
         fork: CreateFork,
         version: Option<EvmVersion>,
         trace_requirements: TraceRequirements,
-        networks: NetworkConfigs,
+        network_profile: ResolvedNetworkProfile,
         create2_deployer: Address,
         state_overrides: Option<StateOverride>,
     ) -> eyre::Result<Self> {
@@ -38,7 +38,7 @@ impl<FEN: FoundryEvmNetwork> TracingExecutor<FEN> {
             .inspectors(|stack| {
                 stack
                     .trace_requirements(trace_requirements)
-                    .networks(networks)
+                    .network_profile(network_profile)
                     .create2_deployer(create2_deployer)
             })
             .spec_id_opt(version.map(evm_spec_id::<SpecFor<FEN>>))
@@ -85,7 +85,8 @@ impl<FEN: FoundryEvmNetwork> TracingExecutor<FEN> {
     pub async fn get_fork_material(
         config: &mut Config,
         mut evm_opts: EvmOpts,
-    ) -> eyre::Result<(EvmEnvFor<FEN>, TxEnvFor<FEN>, CreateFork, Chain, NetworkConfigs)> {
+    ) -> eyre::Result<(EvmEnvFor<FEN>, TxEnvFor<FEN>, CreateFork, Chain, ResolvedNetworkProfile)>
+    {
         evm_opts.fork_url = Some(config.get_rpc_url_or_localhost_http()?.into_owned());
         evm_opts.fork_block_number = config.fork_block_number;
 
@@ -93,13 +94,13 @@ impl<FEN: FoundryEvmNetwork> TracingExecutor<FEN> {
             evm_opts.env::<SpecFor<FEN>, BlockEnvFor<FEN>, TxEnvFor<FEN>>().await?;
 
         let fork = evm_opts.get_fork(config, evm_env.cfg_env.chain_id, fork_block).unwrap();
-        let networks = evm_opts.networks.with_chain_id(evm_env.cfg_env.chain_id);
+        let network_profile = evm_opts.networks.with_chain_id(evm_env.cfg_env.chain_id).resolve();
         config
             .labels
-            .extend(networks.precompiles_label(Some(config.evm_spec_id::<TempoHardfork>())));
+            .extend(network_profile.precompile_labels(Some(config.evm_spec_id::<TempoHardfork>())));
 
         let chain = tx_env.chain_id().unwrap().into();
-        Ok((evm_env, tx_env, fork, chain, networks))
+        Ok((evm_env, tx_env, fork, chain, network_profile))
     }
 }
 

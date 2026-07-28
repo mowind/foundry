@@ -427,7 +427,7 @@ impl VerifyBytecodeArgs {
             tx_env.set_gas_price(evm_env.block_env.basefee() as u128);
 
             if let Some(ref block) = deploy_block_info {
-                configure_env_block::<FEN>(&mut evm_env, block, config.networks);
+                configure_env_block::<FEN>(&mut evm_env, block, config.networks.resolve());
                 tx_env.set_gas_limit(block.header().gas_limit());
                 tx_env.set_gas_price(block.header().base_fee_per_gas().unwrap_or_default() as u128);
             }
@@ -663,7 +663,7 @@ impl VerifyBytecodeArgs {
 
             apply_chain_specific_tx_replay_env_changes(&mut evm_env);
             if let Some(ref block) = block {
-                configure_env_block::<FEN>(&mut evm_env, block, config.networks);
+                configure_env_block::<FEN>(&mut evm_env, block, config.networks.resolve());
 
                 let BlockTransactions::Full(txs) = block.transactions() else {
                     return Err(eyre::eyre!("Could not get block txs"));

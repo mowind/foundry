@@ -286,7 +286,11 @@ impl EvmOpts {
             block_env: block_env_from_header(block.header()),
         };
 
-        apply_chain_and_block_specific_env_changes::<N, _, _>(&mut evm_env, &block, self.networks);
+        apply_chain_and_block_specific_env_changes::<N, _, _>(
+            &mut evm_env,
+            &block,
+            self.networks.resolve(),
+        );
 
         Ok((evm_env, block_number))
     }

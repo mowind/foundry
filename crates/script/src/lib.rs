@@ -63,7 +63,7 @@ use foundry_evm::{
     revm::interpreter::InstructionResult,
     traces::{InternalTraceMode, TraceRequirements, Traces},
 };
-use foundry_evm_networks::NetworkConfigs;
+use foundry_evm_networks::{NetworkConfigs, ResolvedNetworkProfile};
 use foundry_wallets::MultiWalletOpts;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -357,7 +357,8 @@ impl ScriptArgs {
 
         let (config, evm_opts) = self.resolved_evm_opts().await?;
 
-        let is_tempo = evm_opts.networks.is_tempo();
+        let network_profile = evm_opts.networks.resolve();
+        let is_tempo = network_profile.is_tempo();
 
         if self.batch && !is_tempo {
             eyre::bail!("--batch mode is only supported on Tempo networks");
@@ -395,7 +396,7 @@ impl ScriptArgs {
         }
 
         #[cfg(feature = "optimism")]
-        if evm_opts.networks.is_optimism() {
+        if network_profile.is_optimism() {
             return Box::pin(self.run_generic_script::<OpEvmNetwork>(config, evm_opts)).await;
         }
 
@@ -818,6 +819,7 @@ struct JsonResult<'a, N: Network> {
 pub struct ScriptConfig<FEN: FoundryEvmNetwork> {
     pub config: Config,
     pub evm_opts: EvmOpts,
+    pub network_profile: ResolvedNetworkProfile,
     pub sender_nonce: u64,
     sender_nonce_override: Option<u64>,
     /// Maps a rpc url to a backend
@@ -848,9 +850,12 @@ impl<FEN: FoundryEvmNetwork> ScriptConfig<FEN> {
             1
         };
 
+        let network_profile = evm_opts.networks.resolve();
+
         Ok(Self {
             config,
             evm_opts,
+            network_profile,
             sender_nonce,
             sender_nonce_override,
             backends: HashMap::default(),
@@ -936,7 +941,7 @@ impl<FEN: FoundryEvmNetwork> ScriptConfig<FEN> {
                 stack
                     .logs(self.config.live_logs)
                     .trace_requirements(script_trace_requirements(&self.config, debug))
-                    .networks(self.evm_opts.networks)
+                    .network_profile(self.network_profile)
                     .create2_deployer(self.evm_opts.create2_deployer)
             })
             .spec_id(self.config.evm_spec_id())

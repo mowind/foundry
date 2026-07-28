@@ -3040,6 +3040,7 @@ dependencies = [
  "foundry-compilers",
  "foundry-config",
  "foundry-evm",
+ "foundry-evm-networks",
  "foundry-test-utils",
  "itertools 0.15.0",
  "reqwest 0.13.4",

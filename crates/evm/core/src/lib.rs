@@ -27,7 +27,7 @@ pub mod abi {
 
 pub mod env;
 pub use env::*;
-use foundry_evm_networks::NetworkConfigs;
+use foundry_evm_networks::ResolvedNetworkProfile;
 
 pub mod backend;
 pub mod buffer;
@@ -65,9 +65,9 @@ pub trait InspectorExt {
         let _ = msg;
     }
 
-    /// Returns configured networks.
-    fn get_networks(&self) -> NetworkConfigs {
-        NetworkConfigs::default()
+    /// Returns the immutable runtime network profile.
+    fn get_network_profile(&self) -> ResolvedNetworkProfile {
+        ResolvedNetworkProfile::default()
     }
 
     /// Returns the CREATE2 deployer address.

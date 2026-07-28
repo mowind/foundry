@@ -218,13 +218,14 @@ impl CallArgs {
         if self.chain.is_none() {
             self.chain = evm_opts.env.chain_id.map(Chain::from_id);
         }
+        let network_profile = evm_opts.networks.resolve();
 
-        if evm_opts.networks.is_tempo() {
+        if network_profile.is_tempo() {
             return self.run_with_network::<TempoEvmNetwork>().await;
         }
 
         #[cfg(feature = "optimism")]
-        if evm_opts.networks.is_optimism() {
+        if network_profile.is_optimism() {
             return self.run_with_network::<OpEvmNetwork>().await;
         }
 

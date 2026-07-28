@@ -155,13 +155,14 @@ impl RunArgs {
 
         // Auto-detect network from fork chain ID when not explicitly configured.
         evm_opts.infer_network_from_fork().await;
+        let network_profile = evm_opts.networks.resolve();
 
-        if evm_opts.networks.is_tempo() {
+        if network_profile.is_tempo() {
             return self.run_with_evm::<TempoEvmNetwork>().await;
         }
 
         #[cfg(feature = "optimism")]
-        if evm_opts.networks.is_optimism() {
+        if network_profile.is_optimism() {
             return self.run_with_evm::<OpEvmNetwork>().await;
         }
 
@@ -365,7 +366,7 @@ impl RunArgs {
             apply_chain_and_block_specific_env_changes::<FEN::Network, _, _>(
                 &mut evm_env,
                 block,
-                config.networks,
+                config.networks.resolve(),
             );
         }
         apply_chain_specific_tx_replay_env_changes(&mut evm_env);

@@ -273,12 +273,13 @@ enum NetworkDispatchKind {
 }
 
 const fn network_dispatch_kind(evm_opts: &EvmOpts) -> NetworkDispatchKind {
-    if evm_opts.networks.is_tempo() {
+    let network_profile = evm_opts.networks.resolve();
+    if network_profile.is_tempo() {
         return NetworkDispatchKind::Tempo;
     }
 
     #[cfg(feature = "optimism")]
-    if evm_opts.networks.is_optimism() {
+    if network_profile.is_optimism() {
         return NetworkDispatchKind::Optimism;
     }
 
@@ -2801,7 +2802,7 @@ impl TestArgs {
         // In multi-pass mode the per-pass summary is suppressed; the merged summary is
         // printed once by the caller after all passes complete.
         let is_multi_pass = !runner.tcfg.multi_network.all_override_networks.is_empty();
-        let is_tempo_network = runner.tcfg.evm_opts.networks.is_tempo();
+        let is_tempo_network = runner.tcfg.network_profile.is_tempo();
         let decode_internal = runner.decode_internal != InternalTraceMode::None;
 
         // Run tests in a streaming fashion.

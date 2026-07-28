@@ -36,7 +36,7 @@ use foundry_evm::{
     opts::EvmOpts,
     traces::{InternalTraceMode, TraceRequirements},
 };
-use foundry_evm_networks::NetworkVariant;
+use foundry_evm_networks::{NetworkVariant, ResolvedNetworkProfile};
 
 use foundry_linking::{LinkOutput, Linker, LinkerError};
 use rayon::prelude::*;
@@ -474,6 +474,8 @@ pub struct TestRunnerConfig<FEN: FoundryEvmNetwork> {
 
     /// EVM configuration.
     pub evm_opts: EvmOpts,
+    /// Immutable runtime network profile.
+    pub network_profile: ResolvedNetworkProfile,
     /// EVM environment.
     pub evm_env: EvmEnvFor<FEN>,
     /// Transaction environment.
@@ -522,6 +524,7 @@ impl<FEN: FoundryEvmNetwork> TestRunnerConfig<FEN> {
         self.spec_id = config.evm_spec_id();
         self.sender = config.sender;
         self.evm_opts.networks = config.networks;
+        self.network_profile = config.networks.resolve();
         self.isolation = config.isolate;
 
         // Specific to Forge, not present in config.
@@ -552,7 +555,7 @@ impl<FEN: FoundryEvmNetwork> TestRunnerConfig<FEN> {
         inspector.tracing_requirements(self.trace_requirements());
         inspector.collect_line_coverage(self.line_coverage);
         inspector.enable_isolation(self.isolation);
-        inspector.networks(self.evm_opts.networks);
+        inspector.network_profile(self.network_profile);
         // inspector.set_create2_deployer(self.evm_opts.create2_deployer);
 
         // executor.env_mut().clone_from(&self.env);
@@ -587,7 +590,7 @@ impl<FEN: FoundryEvmNetwork> TestRunnerConfig<FEN> {
                     .trace_requirements(self.trace_requirements())
                     .line_coverage(self.line_coverage)
                     .enable_isolation(self.isolation)
-                    .networks(self.evm_opts.networks)
+                    .network_profile(self.network_profile)
                     .create2_deployer(self.evm_opts.create2_deployer)
                     .set_analysis(analysis)
             })
@@ -913,6 +916,8 @@ impl MultiContractRunnerBuilder {
             )
         };
 
+        let network_profile = evm_opts.networks.resolve();
+
         Ok(MultiContractRunner {
             contracts: deployable_contracts,
             revert_decoder,
@@ -928,6 +933,7 @@ impl MultiContractRunnerBuilder {
 
             tcfg: TestRunnerConfig {
                 evm_opts,
+                network_profile,
                 evm_env,
                 tx_env,
                 spec_id: self.config.evm_spec_id(),

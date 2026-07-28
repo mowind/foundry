@@ -378,7 +378,7 @@ impl<FEN: FoundryEvmNetwork> FilledTransactionsState<FEN> {
             for (rpc, total_gas) in total_gas_per_rpc {
                 let provider_info = manager.get(&rpc).expect("provider is set.");
 
-                let token_symbol = if self.script_config.evm_opts.networks.is_tempo() {
+                let token_symbol = if self.script_config.network_profile.is_tempo() {
                     self.args.tempo.fee_token.map_or_else(
                         || "TIP-20".to_string(),
                         |fee_token| {

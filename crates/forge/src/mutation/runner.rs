@@ -623,7 +623,8 @@ fn compile_and_test(
     selected_sources_relative: &[PathBuf],
     isolate: bool,
 ) -> Result<bool> {
-    if evm_opts.networks.is_tempo() {
+    let network_profile = evm_opts.networks.resolve();
+    if network_profile.is_tempo() {
         compile_and_test_inner::<TempoEvmNetwork>(
             config,
             evm_opts,
@@ -635,7 +636,7 @@ fn compile_and_test(
         )
     } else {
         #[cfg(feature = "optimism")]
-        if evm_opts.networks.is_optimism() {
+        if network_profile.is_optimism() {
             return compile_and_test_inner::<OpEvmNetwork>(
                 config,
                 evm_opts,

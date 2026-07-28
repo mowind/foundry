@@ -1,6 +1,7 @@
 use alloy_evm::{
     EthEvm, EthEvmFactory, Evm, EvmEnv, EvmFactory, eth::EthEvmContext, precompiles::PrecompilesMap,
 };
+use foundry_evm_networks::NetworkExecutionContext;
 use foundry_fork_db::DatabaseError;
 use revm::{
     context::{
@@ -49,9 +50,14 @@ impl FoundryEvmFactory for EthEvmFactory {
         let timestamp = evm_env.block_env.timestamp.saturating_to();
         let mut eth_evm = Self::default().create_evm_with_inspector(db, evm_env, inspector);
         eth_evm.cfg.tx_chain_id_check = true;
-        let networks = eth_evm.inspector().get_networks();
-        networks.inject_precompiles(eth_evm.precompiles_mut());
-        networks.inject_chain_precompiles(eth_evm.precompiles_mut(), chain_id, timestamp);
+        eth_evm
+            .inspector()
+            .get_network_profile()
+            .inject_precompiles(
+                eth_evm.precompiles_mut(),
+                NetworkExecutionContext::new(chain_id, timestamp),
+            )
+            .expect("resolved network profile precompile composition must be compatible");
         eth_evm
     }
 

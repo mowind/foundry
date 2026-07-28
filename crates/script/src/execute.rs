@@ -369,7 +369,7 @@ impl<FEN: FoundryEvmNetwork> ExecutedState<FEN> {
         known_contracts: &ContractsByArtifact,
     ) -> Result<CallTraceDecoder> {
         let chain_id = self.script_config.evm_opts.get_remote_chain_id().await;
-        let is_tempo = self.script_config.evm_opts.networks.is_tempo()
+        let is_tempo = self.script_config.network_profile.is_tempo()
             || chain_id.as_ref().is_some_and(|chain| chain.is_tempo());
         let mut tracing = self.script_config.config.tracing.clone();
         tracing.labels.extend(self.execution_result.labeled_addresses.clone());

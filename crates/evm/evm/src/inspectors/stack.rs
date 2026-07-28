@@ -22,7 +22,7 @@ use foundry_evm_core::{
     },
 };
 use foundry_evm_coverage::HitMaps;
-use foundry_evm_networks::{NetworkConfigs, arbitrum};
+use foundry_evm_networks::{ResolvedNetworkProfile, arbitrum};
 use foundry_evm_traces::{SparsedTraceArena, TraceRequirements};
 use revm::{
     Inspector,
@@ -85,8 +85,8 @@ pub struct InspectorStackBuilder<BLOCK: Clone> {
     /// In isolation mode all top-level calls are executed as a separate transaction in a separate
     /// EVM context, enabling more precise gas accounting and transaction state changes.
     pub enable_isolation: bool,
-    /// Networks with enabled features.
-    pub networks: NetworkConfigs,
+    /// Immutable runtime network profile.
+    pub network_profile: ResolvedNetworkProfile,
     /// The wallets to set in the cheatcodes context.
     pub wallets: Option<Wallets>,
     /// The CREATE2 deployer address.
@@ -107,7 +107,7 @@ impl<BLOCK: Clone> Default for InspectorStackBuilder<BLOCK> {
             print: None,
             chisel_state: None,
             enable_isolation: false,
-            networks: NetworkConfigs::default(),
+            network_profile: ResolvedNetworkProfile::default(),
             wallets: None,
             create2_deployer: Default::default(),
         }
@@ -206,10 +206,10 @@ impl<BLOCK: Clone> InspectorStackBuilder<BLOCK> {
         self
     }
 
-    /// Set networks with enabled features.
+    /// Set the immutable runtime network profile.
     #[inline]
-    pub const fn networks(mut self, networks: NetworkConfigs) -> Self {
-        self.networks = networks;
+    pub const fn network_profile(mut self, network_profile: ResolvedNetworkProfile) -> Self {
+        self.network_profile = network_profile;
         self
     }
 
@@ -235,7 +235,7 @@ impl<BLOCK: Clone> InspectorStackBuilder<BLOCK> {
             print,
             chisel_state,
             enable_isolation,
-            networks,
+            network_profile,
             wallets,
             create2_deployer,
         } = self;
@@ -268,10 +268,10 @@ impl<BLOCK: Clone> InspectorStackBuilder<BLOCK> {
         stack.tracing_requirements(trace_requirements);
 
         stack.enable_isolation(enable_isolation);
-        stack.networks(networks);
+        stack.network_profile(network_profile);
         stack.set_create2_deployer(create2_deployer);
 
-        if networks.is_tempo() {
+        if network_profile.is_tempo() {
             stack.inner.tempo_labels = Some(Box::default());
         }
 
@@ -399,7 +399,7 @@ pub struct InspectorStackInner {
     /// Whether to capture sancov trace-cmp operands for dictionary injection.
     pub sancov_trace_cmp: bool,
     pub enable_isolation: bool,
-    pub networks: NetworkConfigs,
+    pub network_profile: ResolvedNetworkProfile,
     pub create2_deployer: Address,
     /// Flag marking if we are in the inner EVM context.
     pub in_inner_context: bool,
@@ -667,10 +667,10 @@ impl<FEN: FoundryEvmNetwork> InspectorStack<FEN> {
         self.inner.enable_isolation = yes;
     }
 
-    /// Set networks with enabled features.
+    /// Set the immutable runtime network profile.
     #[inline]
-    pub const fn networks(&mut self, networks: NetworkConfigs) {
-        self.inner.networks = networks;
+    pub const fn network_profile(&mut self, network_profile: ResolvedNetworkProfile) {
+        self.inner.network_profile = network_profile;
     }
 
     /// Set the CREATE2 deployer address.
@@ -1772,8 +1772,8 @@ impl<FEN: FoundryEvmNetwork> InspectorExt for InspectorStackRefMut<'_, FEN> {
         ));
     }
 
-    fn get_networks(&self) -> NetworkConfigs {
-        self.inner.networks
+    fn get_network_profile(&self) -> ResolvedNetworkProfile {
+        self.inner.network_profile
     }
 
     fn create2_deployer(&self) -> Address {
@@ -1876,8 +1876,8 @@ impl<FEN: FoundryEvmNetwork> InspectorExt for InspectorStack<FEN> {
         self.as_mut().should_use_create2_factory(depth, inputs)
     }
 
-    fn get_networks(&self) -> NetworkConfigs {
-        self.networks
+    fn get_network_profile(&self) -> ResolvedNetworkProfile {
+        self.network_profile
     }
 
     fn create2_deployer(&self) -> Address {
@@ -1977,7 +1977,19 @@ mod tests {
         Address, Fuzzer, InspectorStack, InspectorStackInner, OpcodeStepDispatch, RevertDiagnostic,
         TraceRequirements, compute_batch_create_salt,
     };
-    use foundry_evm_core::evm::EthEvmNetwork;
+    use foundry_evm_core::{InspectorExt, evm::EthEvmNetwork};
+    use foundry_evm_networks::NetworkConfigs;
+
+    #[test]
+    fn inspector_transports_immutable_network_profile_through_isolation() {
+        let network_profile = NetworkConfigs::with_celo().resolve();
+        let mut stack = InspectorStack::<EthEvmNetwork>::new();
+        stack.network_profile(network_profile);
+        stack.enable_isolation(true);
+
+        assert_eq!(stack.get_network_profile(), network_profile);
+        assert_eq!(stack.as_mut().get_network_profile(), network_profile);
+    }
 
     #[test]
     fn opcode_dispatch_defaults_to_no_static_inspectors() {

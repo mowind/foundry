@@ -17,6 +17,7 @@ use foundry_evm::{
     core::{bytecode::InstIter, evm::FoundryEvmNetwork},
     opts::EvmOpts,
 };
+use foundry_evm_networks::ResolvedNetworkProfile;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use solar::{
@@ -279,6 +280,9 @@ pub struct SessionSourceConfig<FEN: FoundryEvmNetwork> {
     pub foundry_config: Config,
     /// EVM Options
     pub evm_opts: EvmOpts,
+    /// Immutable runtime network profile.
+    #[serde(skip)]
+    pub network_profile: ResolvedNetworkProfile,
     /// Disable the default `Vm` import.
     pub no_vm: bool,
     /// In-memory REVM db for the session's runner.

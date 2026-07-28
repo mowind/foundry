@@ -21,7 +21,7 @@ use alloy_primitives::{Address, B256, TxKind, U256, keccak256, map::AddressSet, 
 use alloy_rpc_types::BlockNumberOrTag;
 use eyre::Context;
 use foundry_common::{SYSTEM_TRANSACTION_TYPE, is_known_system_sender};
-use foundry_evm_networks::NetworkConfigs;
+use foundry_evm_networks::{NetworkExecutionContext, ResolvedNetworkProfile};
 pub use foundry_fork_db::{BlockchainDb, ForkBlockEnv, SharedBackend, cache::BlockchainDbMeta};
 use revm::{
     Database, DatabaseCommit, JournalEntry,
@@ -990,11 +990,12 @@ impl<FEN: FoundryEvmNetwork> Backend<FEN> {
             let timestamp = evm_env.block_env.timestamp().saturating_to();
             let replay_db = fork.db.clone();
             let mut evm = FEN::EvmFactory::default().create_evm(replay_db, evm_env);
-            NetworkConfigs::default().inject_chain_precompiles(
-                evm.precompiles_mut(),
-                chain_id,
-                timestamp,
-            );
+            ResolvedNetworkProfile::default()
+                .inject_precompiles(
+                    evm.precompiles_mut(),
+                    NetworkExecutionContext::new(chain_id, timestamp),
+                )
+                .expect("default network profile precompile composition must be compatible");
 
             for tx in &txs_to_replay {
                 let tx_env = TxEnvFor::<FEN>::from_any_rpc_transaction(tx)?;
