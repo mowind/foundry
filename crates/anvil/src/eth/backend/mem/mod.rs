@@ -2484,7 +2484,7 @@ impl<N: Network> Backend<N> {
                 cfg.slots_in_an_epoch,
                 cfg.precompile_factory.clone(),
                 cfg.disable_pool_balance_checks,
-                cfg.get_hardfork(),
+                cfg.get_hardfork_with_network_profile(network_profile),
             )
         };
 
@@ -2617,9 +2617,19 @@ impl<N: Network> Backend<N> {
                     // `setup_fork_db_config`
                     node_config.base_fee.take();
                     node_config.fork_urls = vec![eth_rpc_url.clone()];
-                    node_config.apply_tempo_fork_beneficiary_default(&mut evm_env);
+                    node_config.apply_tempo_fork_beneficiary_default_with_network_profile(
+                        &mut evm_env,
+                        self.network_profile,
+                    );
 
-                    node_config.setup_fork_db_config(eth_rpc_url, &mut evm_env, &self.fees).await?
+                    node_config
+                        .setup_fork_db_config(
+                            eth_rpc_url,
+                            &mut evm_env,
+                            &self.fees,
+                            self.network_profile,
+                        )
+                        .await?
                 };
 
                 *self.db.write().await = Box::new(db);
@@ -2821,8 +2831,9 @@ impl<N: Network> Backend<N> {
         node_config.fork_urls = vec![fork_url.clone()];
 
         let mut evm_env = self.evm_env.read().clone();
-        let (forked_db, client_fork_config) =
-            node_config.setup_fork_db_config(fork_url, &mut evm_env, &self.fees).await?;
+        let (forked_db, client_fork_config) = node_config
+            .setup_fork_db_config(fork_url, &mut evm_env, &self.fees, self.network_profile)
+            .await?;
 
         *self.db.write().await = Box::new(forked_db);
         let fork = ClientFork::new(client_fork_config, Arc::clone(&self.db));

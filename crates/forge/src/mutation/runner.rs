@@ -29,6 +29,7 @@ use foundry_evm::{
     },
     opts::EvmOpts,
 };
+use foundry_evm_networks::ResolvedNetworkProfile;
 use rayon::prelude::*;
 use tempfile::TempDir;
 
@@ -624,15 +625,15 @@ fn compile_and_test(
     isolate: bool,
 ) -> Result<bool> {
     let network_profile = evm_opts.networks.resolve();
+    let runtime = MutationRuntimeConfig { network_profile, create2_deployer_available, isolate };
     if network_profile.is_tempo() {
         compile_and_test_inner::<TempoEvmNetwork>(
             config,
             evm_opts,
-            create2_deployer_available,
+            runtime,
             filter_args,
             rerun_failures,
             selected_sources_relative,
-            isolate,
         )
     } else {
         #[cfg(feature = "optimism")]
@@ -640,33 +641,37 @@ fn compile_and_test(
             return compile_and_test_inner::<OpEvmNetwork>(
                 config,
                 evm_opts,
-                create2_deployer_available,
+                runtime,
                 filter_args,
                 rerun_failures,
                 selected_sources_relative,
-                isolate,
             );
         }
         compile_and_test_inner::<EthEvmNetwork>(
             config,
             evm_opts,
-            create2_deployer_available,
+            runtime,
             filter_args,
             rerun_failures,
             selected_sources_relative,
-            isolate,
         )
     }
+}
+
+#[derive(Clone, Copy)]
+struct MutationRuntimeConfig {
+    network_profile: ResolvedNetworkProfile,
+    create2_deployer_available: bool,
+    isolate: bool,
 }
 
 fn compile_and_test_inner<FEN: FoundryEvmNetwork>(
     config: &Arc<Config>,
     evm_opts: &EvmOpts,
-    create2_deployer_available: bool,
+    runtime: MutationRuntimeConfig,
     filter_args: &FilterArgs,
     rerun_failures: Option<&[RerunFailure]>,
     selected_sources_relative: &[PathBuf],
-    isolate: bool,
 ) -> Result<bool> {
     // Compile
     let files = selected_sources_relative
@@ -701,8 +706,11 @@ fn compile_and_test_inner<FEN: FoundryEvmNetwork>(
 
     // Use block_on to run within the runtime context
     let results: BTreeMap<String, SuiteResult> = rt.block_on(async {
-        let (evm_env, tx_env, fork_block) =
-            evm_opts.env::<SpecFor<FEN>, BlockEnvFor<FEN>, TxEnvFor<FEN>>().await?;
+        let (evm_env, tx_env, fork_block) = evm_opts
+            .env_with_network_profile::<SpecFor<FEN>, BlockEnvFor<FEN>, TxEnvFor<FEN>>(
+                runtime.network_profile,
+            )
+            .await?;
 
         // Build test runner mirroring the canonical `forge test` runner: same
         // isolation flag, same fail-fast semantics for mutation, and same
@@ -712,11 +720,22 @@ fn compile_and_test_inner<FEN: FoundryEvmNetwork>(
             .set_debug(false)
             .initial_balance(evm_opts.initial_balance)
             .sender(evm_opts.sender)
-            .with_fork(evm_opts.get_fork(config, evm_env.cfg_env.chain_id, fork_block))
-            .enable_isolation(isolate)
+            .with_fork(evm_opts.get_fork_with_network_profile(
+                config,
+                evm_env.cfg_env.chain_id,
+                fork_block,
+                runtime.network_profile,
+            ))
+            .enable_isolation(runtime.isolate)
             .fail_fast(true)
-            .with_create2_deployer_available(create2_deployer_available)
-            .build::<FEN, MultiCompiler>(&compile_output, evm_env, tx_env, evm_opts.clone())?;
+            .with_create2_deployer_available(runtime.create2_deployer_available)
+            .build::<FEN, MultiCompiler>(
+                &compile_output,
+                evm_env,
+                tx_env,
+                evm_opts.clone(),
+                runtime.network_profile,
+            )?;
 
         runner.test_collect(&filter)
     })?;

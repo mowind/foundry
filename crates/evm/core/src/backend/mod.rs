@@ -84,6 +84,9 @@ pub type JournaledState = JournalInner<JournalEntry>;
 pub trait DatabaseExt<F: FoundryEvmFactory>:
     Database<Error = DatabaseError> + DatabaseCommit + Debug
 {
+    /// Returns the immutable runtime network profile owned by this backend.
+    fn network_profile(&self) -> ResolvedNetworkProfile;
+
     /// Creates a new state snapshot at the current point of execution.
     ///
     /// A state snapshot is associated with a new unique id that's created for the snapshot.
@@ -454,6 +457,8 @@ pub trait DatabaseExt<F: FoundryEvmFactory>:
 /// after reverting the snapshot.
 #[must_use]
 pub struct Backend<FEN: FoundryEvmNetwork = EthEvmNetwork> {
+    /// Immutable runtime network semantics used by backend-created EVMs.
+    network_profile: ResolvedNetworkProfile,
     /// The access point for managing forks
     forks: MultiFork<AnyNetwork, SpecFor<FEN>, BlockEnvFor<FEN>>,
     // The default in memory db
@@ -486,6 +491,7 @@ pub struct Backend<FEN: FoundryEvmNetwork = EthEvmNetwork> {
 impl<FEN: FoundryEvmNetwork> Clone for Backend<FEN> {
     fn clone(&self) -> Self {
         Self {
+            network_profile: self.network_profile,
             forks: self.forks.clone(),
             mem_db: self.mem_db.clone(),
             fork_init_journaled_state: self.fork_init_journaled_state.clone(),
@@ -498,6 +504,7 @@ impl<FEN: FoundryEvmNetwork> Clone for Backend<FEN> {
 impl<FEN: FoundryEvmNetwork> Debug for Backend<FEN> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Backend")
+            .field("network_profile", &self.network_profile)
             .field("forks", &self.forks)
             .field("mem_db", &self.mem_db)
             .field("fork_init_journaled_state", &self.fork_init_journaled_state)
@@ -514,6 +521,16 @@ impl<FEN: FoundryEvmNetwork> Backend<FEN> {
     /// database.
     pub fn spawn(fork: Option<CreateFork>) -> eyre::Result<Self> {
         Self::new(MultiFork::<AnyNetwork, SpecFor<FEN>, BlockEnvFor<FEN>>::spawn(), fork)
+    }
+
+    /// Creates a new backend carrying the resolved runtime network profile.
+    pub fn spawn_with_network_profile(
+        fork: Option<CreateFork>,
+        network_profile: ResolvedNetworkProfile,
+    ) -> eyre::Result<Self> {
+        let mut backend = Self::spawn(fork)?;
+        backend.network_profile = network_profile;
+        Ok(backend)
     }
 
     /// Creates a new instance of `Backend`
@@ -534,6 +551,7 @@ impl<FEN: FoundryEvmNetwork> Backend<FEN> {
         };
 
         let mut backend = Self {
+            network_profile: ResolvedNetworkProfile::default(),
             forks,
             mem_db: CacheDB::new(Default::default()),
             fork_init_journaled_state: inner.new_journaled_state(),
@@ -564,8 +582,9 @@ impl<FEN: FoundryEvmNetwork> Backend<FEN> {
         id: &ForkId,
         fork: Fork<AnyNetwork, BlockEnvFor<FEN>>,
         journaled_state: JournaledState,
+        network_profile: ResolvedNetworkProfile,
     ) -> eyre::Result<Self> {
-        let mut backend = Self::spawn(None)?;
+        let mut backend = Self::spawn_with_network_profile(None, network_profile)?;
         let fork_ids = backend.inner.insert_new_fork(id.clone(), fork.db, journaled_state);
         backend.inner.launched_with_fork = Some((id.clone(), fork_ids.0, fork_ids.1));
         backend.active_fork_ids = Some(fork_ids);
@@ -575,6 +594,7 @@ impl<FEN: FoundryEvmNetwork> Backend<FEN> {
     /// Creates a new instance with a `BackendDatabase::InMemory` cache layer for the `CacheDB`
     pub fn clone_empty(&self) -> Self {
         Self {
+            network_profile: self.network_profile,
             forks: self.forks.clone(),
             mem_db: CacheDB::new(Default::default()),
             fork_init_journaled_state: self.inner.new_journaled_state(),
@@ -990,12 +1010,12 @@ impl<FEN: FoundryEvmNetwork> Backend<FEN> {
             let timestamp = evm_env.block_env.timestamp().saturating_to();
             let replay_db = fork.db.clone();
             let mut evm = FEN::EvmFactory::default().create_evm(replay_db, evm_env);
-            ResolvedNetworkProfile::default()
+            self.network_profile
                 .inject_precompiles(
                     evm.precompiles_mut(),
                     NetworkExecutionContext::new(chain_id, timestamp),
                 )
-                .expect("default network profile precompile composition must be compatible");
+                .wrap_err("failed to compose replay precompiles")?;
 
             for tx in &txs_to_replay {
                 let tx_env = TxEnvFor::<FEN>::from_any_rpc_transaction(tx)?;
@@ -1018,6 +1038,10 @@ impl<FEN: FoundryEvmNetwork> Backend<FEN> {
 }
 
 impl<FEN: FoundryEvmNetwork> DatabaseExt<FEN::EvmFactory> for Backend<FEN> {
+    fn network_profile(&self) -> ResolvedNetworkProfile {
+        self.network_profile
+    }
+
     fn snapshot_state(
         &mut self,
         journaled_state: &JournaledState,
@@ -2210,7 +2234,12 @@ fn commit_transaction<FEN: FoundryEvmNetwork>(
         let fork = fork.clone();
         let journaled_state = journaled_state.clone();
         let depth = journaled_state.depth;
-        let mut db: Backend<FEN> = Backend::new_with_fork(fork_id, fork, journaled_state)?;
+        let mut db: Backend<FEN> = Backend::new_with_fork(
+            fork_id,
+            fork,
+            journaled_state,
+            inspector.get_network_profile(),
+        )?;
 
         let mut evm =
             FEN::EvmFactory::default().create_foundry_nested_evm(&mut db, evm_env, inspector);

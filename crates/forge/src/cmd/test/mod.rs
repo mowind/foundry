@@ -74,6 +74,7 @@ use foundry_evm::{
         trace_arena_at_depth,
     },
 };
+use foundry_evm_networks::ResolvedNetworkProfile;
 use foundry_tui::tui_mode;
 use rand::Rng;
 use regex::Regex;
@@ -272,8 +273,7 @@ enum NetworkDispatchKind {
     Eth,
 }
 
-const fn network_dispatch_kind(evm_opts: &EvmOpts) -> NetworkDispatchKind {
-    let network_profile = evm_opts.networks.resolve();
+const fn network_dispatch_kind(network_profile: ResolvedNetworkProfile) -> NetworkDispatchKind {
     if network_profile.is_tempo() {
         return NetworkDispatchKind::Tempo;
     }
@@ -2483,13 +2483,17 @@ impl TestArgs {
         &self,
         config: Config,
         evm_opts: EvmOpts,
+        network_profile: ResolvedNetworkProfile,
         output: &ProjectCompileOutput,
         filter: &mut ProjectPathsAwareFilter,
         execution: TestExecutionOptions,
     ) -> eyre::Result<(Libraries, TestOutcome)> {
         let verbosity = evm_opts.verbosity;
-        let (evm_env, tx_env, fork_block) =
-            evm_opts.env::<SpecFor<FEN>, BlockEnvFor<FEN>, TxEnvFor<FEN>>().await?;
+        let (evm_env, tx_env, fork_block) = evm_opts
+            .env_with_network_profile::<SpecFor<FEN>, BlockEnvFor<FEN>, TxEnvFor<FEN>>(
+                network_profile,
+            )
+            .await?;
         let create2_deployer_available = evm_opts.can_use_create2_deployer(fork_block).await?;
 
         let config = Arc::new(config);
@@ -2500,7 +2504,12 @@ impl TestArgs {
             .set_record_all_steps(self.evm_profile.is_some())
             .initial_balance(evm_opts.initial_balance)
             .sender(evm_opts.sender)
-            .with_fork(evm_opts.get_fork(&config, evm_env.cfg_env.chain_id, fork_block))
+            .with_fork(evm_opts.get_fork_with_network_profile(
+                &config,
+                evm_env.cfg_env.chain_id,
+                fork_block,
+                network_profile,
+            ))
             .enable_isolation(evm_opts.isolate)
             .fail_fast(self.fail_fast)
             .set_coverage(execution.coverage)
@@ -2510,7 +2519,7 @@ impl TestArgs {
             .with_fuzz_failure_replay(self.fuzz_failure_replay)
             .with_symbolic_artifact_replay(execution.replay_symbolic_artifact)
             .with_create2_deployer_available(create2_deployer_available)
-            .build::<FEN, MultiCompiler>(output, evm_env, tx_env, evm_opts)?;
+            .build::<FEN, MultiCompiler>(output, evm_env, tx_env, evm_opts, network_profile)?;
 
         let libraries = runner.libraries.clone();
         let outcome = self.run_tests_inner(runner, config, verbosity, filter, output).await?;
@@ -2521,25 +2530,34 @@ impl TestArgs {
         &self,
         config: Config,
         evm_opts: EvmOpts,
+        network_profile: ResolvedNetworkProfile,
         output: &ProjectCompileOutput,
         options: FuzzMinimizeNetworkPassOptions,
     ) -> eyre::Result<MultiContractRunner<FEN>> {
-        let (evm_env, tx_env, fork_block) =
-            evm_opts.env::<SpecFor<FEN>, BlockEnvFor<FEN>, TxEnvFor<FEN>>().await?;
+        let (evm_env, tx_env, fork_block) = evm_opts
+            .env_with_network_profile::<SpecFor<FEN>, BlockEnvFor<FEN>, TxEnvFor<FEN>>(
+                network_profile,
+            )
+            .await?;
         let create2_deployer_available = evm_opts.can_use_create2_deployer(fork_block).await?;
 
         let config = Arc::new(config);
         MultiContractRunnerBuilder::new(config.clone(), options.inline_config)
             .initial_balance(evm_opts.initial_balance)
             .sender(evm_opts.sender)
-            .with_fork(evm_opts.get_fork(&config, evm_env.cfg_env.chain_id, fork_block))
+            .with_fork(evm_opts.get_fork_with_network_profile(
+                &config,
+                evm_env.cfg_env.chain_id,
+                fork_block,
+                network_profile,
+            ))
             .enable_isolation(evm_opts.isolate)
             .fail_fast(self.fail_fast)
             .with_multi_network(options.multi_network)
             .with_fuzz_only(self.fuzz_only.is_enabled())
             .with_fuzz_failure_replay(self.fuzz_failure_replay)
             .with_create2_deployer_available(create2_deployer_available)
-            .build::<FEN, MultiCompiler>(output, evm_env, tx_env, evm_opts)
+            .build::<FEN, MultiCompiler>(output, evm_env, tx_env, evm_opts, network_profile)
     }
 
     /// Dispatches `build_and_run_tests` to the correct network type based on `evm_opts.networks`.
@@ -2552,23 +2570,39 @@ impl TestArgs {
         filter: &mut ProjectPathsAwareFilter,
         execution: TestExecutionOptions,
     ) -> eyre::Result<(Libraries, TestOutcome)> {
-        match network_dispatch_kind(dispatch_opts) {
+        let network_profile = dispatch_opts.networks.resolve();
+        match network_dispatch_kind(network_profile) {
             NetworkDispatchKind::Tempo => {
                 self.build_and_run_tests::<TempoEvmNetwork>(
-                    config, evm_opts, output, filter, execution,
+                    config,
+                    evm_opts,
+                    network_profile,
+                    output,
+                    filter,
+                    execution,
                 )
                 .await
             }
             #[cfg(feature = "optimism")]
             NetworkDispatchKind::Optimism => {
                 self.build_and_run_tests::<OpEvmNetwork>(
-                    config, evm_opts, output, filter, execution,
+                    config,
+                    evm_opts,
+                    network_profile,
+                    output,
+                    filter,
+                    execution,
                 )
                 .await
             }
             NetworkDispatchKind::Eth => {
                 self.build_and_run_tests::<EthEvmNetwork>(
-                    config, evm_opts, output, filter, execution,
+                    config,
+                    evm_opts,
+                    network_profile,
+                    output,
+                    filter,
+                    execution,
                 )
                 .await
             }
@@ -2584,18 +2618,37 @@ impl TestArgs {
         options: FuzzMinimizeNetworkPassOptions,
         filter: &ProjectPathsAwareFilter,
     ) -> eyre::Result<FuzzMinimizeReplayPass> {
-        match network_dispatch_kind(dispatch_opts) {
+        let network_profile = dispatch_opts.networks.resolve();
+        match network_dispatch_kind(network_profile) {
             NetworkDispatchKind::Tempo => self
-                .build_fuzz_minimize_runner::<TempoEvmNetwork>(config, evm_opts, output, options)
+                .build_fuzz_minimize_runner::<TempoEvmNetwork>(
+                    config,
+                    evm_opts,
+                    network_profile,
+                    output,
+                    options,
+                )
                 .await
                 .map(|runner| fuzz_minimize_replay(runner, filter)),
             #[cfg(feature = "optimism")]
             NetworkDispatchKind::Optimism => self
-                .build_fuzz_minimize_runner::<OpEvmNetwork>(config, evm_opts, output, options)
+                .build_fuzz_minimize_runner::<OpEvmNetwork>(
+                    config,
+                    evm_opts,
+                    network_profile,
+                    output,
+                    options,
+                )
                 .await
                 .map(|runner| fuzz_minimize_replay(runner, filter)),
             NetworkDispatchKind::Eth => self
-                .build_fuzz_minimize_runner::<EthEvmNetwork>(config, evm_opts, output, options)
+                .build_fuzz_minimize_runner::<EthEvmNetwork>(
+                    config,
+                    evm_opts,
+                    network_profile,
+                    output,
+                    options,
+                )
                 .await
                 .map(|runner| fuzz_minimize_replay(runner, filter)),
         }

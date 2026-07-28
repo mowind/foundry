@@ -301,6 +301,7 @@ pub async fn get_tracing_executor<FEN>(
     fork_blk_num: u64,
     evm_version: EvmVersion,
     evm_opts: EvmOpts,
+    network_profile: ResolvedNetworkProfile,
 ) -> Result<(EvmEnvFor<FEN>, TxEnvFor<FEN>, TracingExecutor<FEN>)>
 where
     FEN: FoundryEvmNetwork,
@@ -310,7 +311,7 @@ where
 
     let create2_deployer = evm_opts.create2_deployer;
     let (evm_env, tx_env, fork, _chain, networks) =
-        TracingExecutor::<FEN>::get_fork_material(fork_config, evm_opts).await?;
+        TracingExecutor::<FEN>::get_fork_material(fork_config, evm_opts, network_profile).await?;
 
     let executor = TracingExecutor::<FEN>::new(
         (evm_env.clone(), tx_env.clone()),

@@ -331,8 +331,7 @@ impl<FEN: FoundryEvmNetwork> ChiselDispatcher<FEN> {
             &new_session.source.config.foundry_config,
             id,
         )?;
-        new_session.source.config.network_profile =
-            new_session.source.config.foundry_config.networks.resolve();
+        new_session.source.config.network_profile = self.session.source.config.network_profile;
         new_session.source.build()?;
         self.session = new_session;
         sh_println!("Loaded Chisel session! (ID = {})", self.session.id.as_ref().unwrap())
@@ -542,8 +541,8 @@ impl<FEN: FoundryEvmNetwork> ChiselDispatcher<FEN> {
     }
 }
 
-fn config_network_name(config: &Config) -> &'static str {
-    config.networks.active_network_name().unwrap_or("ethereum")
+const fn config_network_name(config: &Config) -> &'static str {
+    config.networks.resolve().name()
 }
 
 fn ensure_loaded_session_network_matches(
@@ -556,7 +555,8 @@ fn ensure_loaded_session_network_matches(
     if current_network != loaded_network {
         eyre::bail!(
             "Chisel session `{id}` was saved for network `{loaded_network}`, but the current \
-             network is `{current_network}`. Rerun with `--network {loaded_network}` to load it.",
+             network is `{current_network}`. Rerun with the matching network configuration to \
+             load it.",
         );
     }
     Ok(())
@@ -619,7 +619,7 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Chisel session `42` was saved for network `tempo`, but the current network is \
-             `ethereum`. Rerun with `--network tempo` to load it."
+             `ethereum`. Rerun with the matching network configuration to load it."
         );
     }
 
@@ -629,6 +629,19 @@ mod tests {
         let loaded = config_with_network(Some("tempo"));
 
         ensure_loaded_session_network_matches(&current, &loaded, "42").unwrap();
+    }
+
+    #[test]
+    fn ensure_loaded_session_network_matches_distinguishes_celo_from_ethereum() {
+        let current = Config::default();
+        let loaded = Config {
+            networks: foundry_evm_networks::NetworkConfigs::with_celo(),
+            ..Default::default()
+        };
+
+        let err = ensure_loaded_session_network_matches(&current, &loaded, "celo").unwrap_err();
+        assert!(err.to_string().contains("saved for network `celo`"), "{err}");
+        assert!(err.to_string().contains("current network is `ethereum`"), "{err}");
     }
 
     #[test]

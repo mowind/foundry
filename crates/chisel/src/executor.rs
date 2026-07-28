@@ -193,18 +193,25 @@ impl<FEN: FoundryEvmNetwork> SessionSource<FEN> {
     }
 
     async fn build_runner(&mut self, final_pc: usize) -> Result<ChiselRunner<FEN>> {
-        let (evm_env, tx_env, fork_block) =
-            self.config.evm_opts.env::<SpecFor<FEN>, BlockEnvFor<FEN>, TxEnvFor<FEN>>().await?;
+        let (evm_env, tx_env, fork_block) = self
+            .config
+            .evm_opts
+            .env_with_network_profile::<SpecFor<FEN>, BlockEnvFor<FEN>, TxEnvFor<FEN>>(
+                self.config.network_profile,
+            )
+            .await?;
 
         let backend = match self.config.backend.clone() {
             Some(backend) => backend,
             None => {
-                let fork = self.config.evm_opts.get_fork(
+                let fork = self.config.evm_opts.get_fork_with_network_profile(
                     &self.config.foundry_config,
                     evm_env.cfg_env.chain_id,
                     fork_block,
+                    self.config.network_profile,
                 );
-                let backend = Backend::spawn(fork)?;
+                let backend =
+                    Backend::spawn_with_network_profile(fork, self.config.network_profile)?;
                 self.config.backend = Some(backend.clone());
                 backend
             }

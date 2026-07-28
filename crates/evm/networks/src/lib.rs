@@ -122,6 +122,14 @@ pub fn active_tempo_precompile_addresses(hardfork: TempoHardfork) -> impl Iterat
         .filter(move |&address| is_tempo_precompile_active_at(address, hardfork))
 }
 
+fn active_tempo_precompiles(
+    hardfork: Option<TempoHardfork>,
+) -> impl Iterator<Item = (&'static str, Address)> {
+    TEMPO_PRECOMPILES.iter().copied().filter(move |(_, address)| {
+        hardfork.is_none_or(|hardfork| is_tempo_precompile_active_at(*address, hardfork))
+    })
+}
+
 #[derive(
     Clone,
     Copy,
@@ -460,14 +468,7 @@ impl ResolvedNetworkProfile {
         }
         if self.is_tempo() {
             labels.extend(
-                TEMPO_PRECOMPILES
-                    .iter()
-                    .copied()
-                    .filter(|(_, address)| {
-                        tempo_hardfork.is_none_or(|hardfork| {
-                            is_tempo_precompile_active_at(*address, hardfork)
-                        })
-                    })
+                active_tempo_precompiles(tempo_hardfork)
                     .map(|(label, address)| (address, label.to_string())),
             );
         }
@@ -486,14 +487,7 @@ impl ResolvedNetworkProfile {
         }
         if self.is_tempo() {
             precompiles.extend(
-                TEMPO_PRECOMPILES
-                    .iter()
-                    .copied()
-                    .filter(|(_, address)| {
-                        tempo_hardfork.is_none_or(|hardfork| {
-                            is_tempo_precompile_active_at(*address, hardfork)
-                        })
-                    })
+                active_tempo_precompiles(tempo_hardfork)
                     .map(|(label, address)| (label.to_string(), address)),
             );
         }

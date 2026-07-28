@@ -44,7 +44,7 @@ use foundry_evm::{
     executors::EvmError,
     utils::apply_chain_specific_tx_replay_env_changes,
 };
-use foundry_evm_networks::NetworkVariant;
+use foundry_evm_networks::{NetworkVariant, ResolvedNetworkProfile};
 use revm::{context::Block as _, state::AccountInfo};
 use std::path::PathBuf;
 
@@ -178,21 +178,26 @@ impl VerifyBytecodeArgs {
             network
         };
 
+        let network_profile = config.networks.resolve();
         match network {
             NetworkVariant::Ethereum => {
-                self.run_with_network_and_config::<EthEvmNetwork>(config).await
+                self.run_with_network_and_config::<EthEvmNetwork>(config, network_profile).await
             }
             #[cfg(feature = "optimism")]
             NetworkVariant::Optimism => {
-                self.run_with_network_and_config::<OpEvmNetwork>(config).await
+                self.run_with_network_and_config::<OpEvmNetwork>(config, network_profile).await
             }
             NetworkVariant::Tempo => {
-                self.run_with_network_and_config::<TempoEvmNetwork>(config).await
+                self.run_with_network_and_config::<TempoEvmNetwork>(config, network_profile).await
             }
         }
     }
 
-    async fn run_with_network_and_config<FEN>(mut self, config: Config) -> Result<()>
+    async fn run_with_network_and_config<FEN>(
+        mut self,
+        config: Config,
+        network_profile: ResolvedNetworkProfile,
+    ) -> Result<()>
     where
         FEN: FoundryEvmNetwork,
     {
@@ -410,6 +415,7 @@ impl VerifyBytecodeArgs {
                 deploy_block,
                 evm_version,
                 evm_opts,
+                network_profile,
             )
             .await?;
 
@@ -427,7 +433,7 @@ impl VerifyBytecodeArgs {
             tx_env.set_gas_price(evm_env.block_env.basefee() as u128);
 
             if let Some(ref block) = deploy_block_info {
-                configure_env_block::<FEN>(&mut evm_env, block, config.networks.resolve());
+                configure_env_block::<FEN>(&mut evm_env, block, network_profile);
                 tx_env.set_gas_limit(block.header().gas_limit());
                 tx_env.set_gas_price(block.header().base_fee_per_gas().unwrap_or_default() as u128);
             }
@@ -647,6 +653,7 @@ impl VerifyBytecodeArgs {
                 simulation_block - 1, // env.fork_block_number
                 evm_version,
                 evm_opts,
+                network_profile,
             )
             .await?;
             evm_env.block_env.set_number(U256::from(simulation_block));
@@ -663,7 +670,7 @@ impl VerifyBytecodeArgs {
 
             apply_chain_specific_tx_replay_env_changes(&mut evm_env);
             if let Some(ref block) = block {
-                configure_env_block::<FEN>(&mut evm_env, block, config.networks.resolve());
+                configure_env_block::<FEN>(&mut evm_env, block, network_profile);
 
                 let BlockTransactions::Full(txs) = block.transactions() else {
                     return Err(eyre::eyre!("Could not get block txs"));

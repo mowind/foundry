@@ -51,6 +51,7 @@ use foundry_evm::{
     opts::EvmOpts,
     traces::{InternalTraceMode, SparsedTraceArena, TraceRequirements, Traces},
 };
+use foundry_evm_networks::ResolvedNetworkProfile;
 use futures::TryFutureExt;
 use revm::{DatabaseRef, context::Block, primitives::hardfork::SpecId};
 
@@ -158,20 +159,23 @@ impl RunArgs {
         let network_profile = evm_opts.networks.resolve();
 
         if network_profile.is_tempo() {
-            return self.run_with_evm::<TempoEvmNetwork>().await;
+            return self.run_with_evm::<TempoEvmNetwork>(evm_opts, network_profile).await;
         }
 
         #[cfg(feature = "optimism")]
         if network_profile.is_optimism() {
-            return self.run_with_evm::<OpEvmNetwork>().await;
+            return self.run_with_evm::<OpEvmNetwork>(evm_opts, network_profile).await;
         }
 
-        self.run_with_evm::<EthEvmNetwork>().await
+        self.run_with_evm::<EthEvmNetwork>(evm_opts, network_profile).await
     }
 
-    async fn run_with_evm<FEN: FoundryEvmNetwork>(mut self) -> Result<()> {
+    async fn run_with_evm<FEN: FoundryEvmNetwork>(
+        mut self,
+        evm_opts: EvmOpts,
+        network_profile: ResolvedNetworkProfile,
+    ) -> Result<()> {
         let figment = self.rpc.clone().into_figment(self.with_local_artifacts).merge(&self);
-        let evm_opts = figment.extract::<EvmOpts>()?;
         let mut config = load_config_from_provider(figment)?;
         self.tracing.labels.append(&mut self.legacy_labels);
         let tracing = self.resolve_tracing(&config.tracing, shell::verbosity());
@@ -313,7 +317,7 @@ impl RunArgs {
         let (block, (mut evm_env, tx_env, fork, chain, networks)) = tokio::try_join!(
             // fetch the block the transaction was mined in
             provider.get_block(tx_block_number.into()).full().into_future().map_err(Into::into),
-            TracingExecutor::<FEN>::get_fork_material(&mut config, evm_opts)
+            TracingExecutor::<FEN>::get_fork_material(&mut config, evm_opts, network_profile)
         )?;
 
         let mut evm_version = self.evm_version;
@@ -366,7 +370,7 @@ impl RunArgs {
             apply_chain_and_block_specific_env_changes::<FEN::Network, _, _>(
                 &mut evm_env,
                 block,
-                config.networks.resolve(),
+                network_profile,
             );
         }
         apply_chain_specific_tx_replay_env_changes(&mut evm_env);

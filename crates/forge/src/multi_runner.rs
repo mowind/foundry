@@ -271,7 +271,7 @@ impl<FEN: FoundryEvmNetwork> MultiContractRunner<FEN> {
         trace!("running all tests");
 
         // The DB backend that serves all the data.
-        let db = Backend::spawn(self.fork.take())?;
+        let db = Backend::spawn_with_network_profile(self.fork.take(), self.tcfg.network_profile)?;
 
         let find_timer = Instant::now();
         let contracts = self.matching_contracts(filter).collect::<Vec<_>>();
@@ -523,8 +523,6 @@ impl<FEN: FoundryEvmNetwork> TestRunnerConfig<FEN> {
 
         self.spec_id = config.evm_spec_id();
         self.sender = config.sender;
-        self.evm_opts.networks = config.networks;
-        self.network_profile = config.networks.resolve();
         self.isolation = config.isolate;
 
         // Specific to Forge, not present in config.
@@ -775,6 +773,7 @@ impl MultiContractRunnerBuilder {
         evm_env: EvmEnvFor<FEN>,
         tx_env: TxEnvFor<FEN>,
         evm_opts: EvmOpts,
+        network_profile: ResolvedNetworkProfile,
     ) -> Result<MultiContractRunner<FEN>> {
         let root = &self.config.root;
         let contracts = output
@@ -915,8 +914,6 @@ impl MultiContractRunnerBuilder {
                 invariant_max_literals,
             )
         };
-
-        let network_profile = evm_opts.networks.resolve();
 
         Ok(MultiContractRunner {
             contracts: deployable_contracts,
@@ -1102,6 +1099,7 @@ mod tests {
             enable_caching: false,
             url: "http://localhost:8545".into(),
             evm_opts: evm_opts.clone(),
+            network_profile: ResolvedNetworkProfile::default(),
         });
         assert!(!builder.create2_deployer_available(&evm_opts));
         builder.fork = None;

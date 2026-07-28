@@ -52,6 +52,7 @@ use foundry_evm::{
     opts::EvmOpts,
     traces::{InternalTraceMode, SparsedTraceArena, TraceRequirements},
 };
+use foundry_evm_networks::{NetworkConfigs, ResolvedNetworkProfile};
 use foundry_wallets::WalletOpts;
 use std::str::FromStr;
 
@@ -205,13 +206,11 @@ impl CallArgs {
             return self.run_curl().await;
         }
 
-        if self.tx.tempo.is_tempo() {
-            return self.run_with_network::<TempoEvmNetwork>().await;
-        }
-
         let figment = self.rpc.clone().into_figment(self.with_local_artifacts).merge(&self);
         let mut evm_opts = figment.extract::<EvmOpts>()?;
-        if let Some(chain) = self.chain {
+        if self.tx.tempo.is_tempo() {
+            evm_opts.networks = NetworkConfigs::with_tempo();
+        } else if let Some(chain) = self.chain {
             evm_opts.networks = evm_opts.networks.with_chain_id(chain.id());
         }
         evm_opts.infer_network_from_fork().await;
@@ -221,15 +220,15 @@ impl CallArgs {
         let network_profile = evm_opts.networks.resolve();
 
         if network_profile.is_tempo() {
-            return self.run_with_network::<TempoEvmNetwork>().await;
+            return self.run_with_network::<TempoEvmNetwork>(evm_opts, network_profile).await;
         }
 
         #[cfg(feature = "optimism")]
         if network_profile.is_optimism() {
-            return self.run_with_network::<OpEvmNetwork>().await;
+            return self.run_with_network::<OpEvmNetwork>(evm_opts, network_profile).await;
         }
 
-        self.run_with_network::<EthEvmNetwork>().await
+        self.run_with_network::<EthEvmNetwork>(evm_opts, network_profile).await
     }
 
     fn validate_trace_args(&self) -> Result<()> {
@@ -250,12 +249,15 @@ impl CallArgs {
         Ok(())
     }
 
-    pub async fn run_with_network<FEN: FoundryEvmNetwork>(self) -> Result<()>
+    pub async fn run_with_network<FEN: FoundryEvmNetwork>(
+        self,
+        evm_opts: EvmOpts,
+        network_profile: ResolvedNetworkProfile,
+    ) -> Result<()>
     where
         <FEN::Network as Network>::TransactionRequest: FoundryTransactionBuilder<FEN::Network>,
     {
         let figment = self.rpc.clone().into_figment(self.with_local_artifacts).merge(&self);
-        let evm_opts = figment.extract::<EvmOpts>()?;
         let mut config = load_config_from_provider(figment)?;
         let state_overrides = self.get_state_overrides()?;
         let block_overrides = self.get_block_overrides()?;
@@ -419,7 +421,8 @@ impl CallArgs {
             let create2_deployer = evm_opts.create2_deployer;
             let verbosity = tracing.verbosity;
             let (mut evm_env, tx_env, fork, chain, networks) =
-                TracingExecutor::<FEN>::get_fork_material(&mut config, evm_opts).await?;
+                TracingExecutor::<FEN>::get_fork_material(&mut config, evm_opts, network_profile)
+                    .await?;
 
             // modify settings that usually set in eth_call
             evm_env.cfg_env.disable_block_gas_limit = true;

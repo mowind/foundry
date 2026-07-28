@@ -296,10 +296,21 @@ impl ScriptArgs {
         Ok((config, evm_opts))
     }
 
+    #[cfg(test)]
     async fn preprocess<FEN: FoundryEvmNetwork>(
+        self,
+        config: Config,
+        evm_opts: EvmOpts,
+    ) -> Result<PreprocessedState<FEN>> {
+        let network_profile = evm_opts.networks.resolve();
+        self.preprocess_with_network_profile(config, evm_opts, network_profile).await
+    }
+
+    async fn preprocess_with_network_profile<FEN: FoundryEvmNetwork>(
         self,
         mut config: Config,
         mut evm_opts: EvmOpts,
+        network_profile: ResolvedNetworkProfile,
     ) -> Result<PreprocessedState<FEN>> {
         let args = self;
         let mut tempo = args.tempo.clone();
@@ -334,8 +345,15 @@ impl ScriptArgs {
         tempo.resolve_expires();
         config.tracing = args.tracing.resolve(&config.tracing, evm_opts.verbosity);
 
-        let script_config =
-            ScriptConfig::new(config, evm_opts, args.batch, tempo, args.sender_nonce).await?;
+        let script_config = ScriptConfig::new(
+            config,
+            evm_opts,
+            network_profile,
+            args.batch,
+            tempo,
+            args.sender_nonce,
+        )
+        .await?;
         Ok(PreprocessedState { args, script_config, script_wallets, browser_wallet })
     }
 
@@ -373,11 +391,13 @@ impl ScriptArgs {
         if is_tempo {
             let batch = self.batch;
             return Box::pin(async move {
-                let bundled =
-                    match self.prepare_bundled::<TempoEvmNetwork>(config, evm_opts).await? {
-                        Some(bundled) => bundled,
-                        None => return Ok(()),
-                    };
+                let bundled = match self
+                    .prepare_bundled::<TempoEvmNetwork>(config, evm_opts, network_profile)
+                    .await?
+                {
+                    Some(bundled) => bundled,
+                    None => return Ok(()),
+                };
                 // batch mode owns its own pending recovery inside broadcast_batch(); running the
                 // generic wait_for_pending() first would race with that and could double-process
                 // an already-confirmed batch hash.
@@ -397,10 +417,15 @@ impl ScriptArgs {
 
         #[cfg(feature = "optimism")]
         if network_profile.is_optimism() {
-            return Box::pin(self.run_generic_script::<OpEvmNetwork>(config, evm_opts)).await;
+            return Box::pin(self.run_generic_script::<OpEvmNetwork>(
+                config,
+                evm_opts,
+                network_profile,
+            ))
+            .await;
         }
 
-        Box::pin(self.run_generic_script::<EthEvmNetwork>(config, evm_opts)).await
+        Box::pin(self.run_generic_script::<EthEvmNetwork>(config, evm_opts, network_profile)).await
     }
 
     /// Prepares the bundled state (compile, simulate, bundle) and returns it
@@ -411,8 +436,10 @@ impl ScriptArgs {
         self,
         config: Config,
         evm_opts: EvmOpts,
+        network_profile: ResolvedNetworkProfile,
     ) -> Result<Option<BundledState<FEN>>> {
-        let state = self.preprocess::<FEN>(config, evm_opts).await?;
+        let state =
+            self.preprocess_with_network_profile::<FEN>(config, evm_opts, network_profile).await?;
         let create2_deployer = state.script_config.evm_opts.create2_deployer;
         let compiled = state.compile()?;
 
@@ -516,8 +543,9 @@ impl ScriptArgs {
         self,
         config: Config,
         evm_opts: EvmOpts,
+        network_profile: ResolvedNetworkProfile,
     ) -> Result<()> {
-        let bundled = match self.prepare_bundled::<FEN>(config, evm_opts).await? {
+        let bundled = match self.prepare_bundled::<FEN>(config, evm_opts, network_profile).await? {
             Some(bundled) => bundled,
             None => return Ok(()),
         };
@@ -834,6 +862,7 @@ impl<FEN: FoundryEvmNetwork> ScriptConfig<FEN> {
     pub async fn new(
         config: Config,
         mut evm_opts: EvmOpts,
+        network_profile: ResolvedNetworkProfile,
         batch: bool,
         tempo: TempoOpts,
         sender_nonce_override: Option<u64>,
@@ -849,8 +878,6 @@ impl<FEN: FoundryEvmNetwork> ScriptConfig<FEN> {
             // dapptools compatibility
             1
         };
-
-        let network_profile = evm_opts.networks.resolve();
 
         Ok(Self {
             config,
@@ -912,7 +939,10 @@ impl<FEN: FoundryEvmNetwork> ScriptConfig<FEN> {
         restricted: bool,
     ) -> Result<ScriptRunner<FEN>> {
         trace!("preparing script runner");
-        let (evm_env, mut tx_env, fork_block) = self.evm_opts.env::<_, _, TxEnvFor<FEN>>().await?;
+        let (evm_env, mut tx_env, fork_block) = self
+            .evm_opts
+            .env_with_network_profile::<_, _, TxEnvFor<FEN>>(self.network_profile)
+            .await?;
         if self.evm_opts.fork_url.is_some() && self.evm_opts.fork_block_number.is_none() {
             self.evm_opts.fork_block_number = fork_block;
         }
@@ -921,9 +951,13 @@ impl<FEN: FoundryEvmNetwork> ScriptConfig<FEN> {
             match self.backends.get(fork_url) {
                 Some(db) => db.clone(),
                 None => {
-                    let fork =
-                        self.evm_opts.get_fork(&self.config, evm_env.cfg_env.chain_id, fork_block);
-                    let backend = Backend::spawn(fork)?;
+                    let fork = self.evm_opts.get_fork_with_network_profile(
+                        &self.config,
+                        evm_env.cfg_env.chain_id,
+                        fork_block,
+                        self.network_profile,
+                    );
+                    let backend = Backend::spawn_with_network_profile(fork, self.network_profile)?;
                     self.backends.insert(fork_url.clone(), backend.clone());
                     backend
                 }
@@ -932,7 +966,7 @@ impl<FEN: FoundryEvmNetwork> ScriptConfig<FEN> {
             // It's only really `None`, when we don't pass any `--fork-url`. And if so, there is
             // no need to cache it, since there won't be any onchain simulation that we'd need
             // to cache the backend for.
-            Backend::spawn(None)?
+            Backend::spawn_with_network_profile(None, self.network_profile)?
         };
 
         // We need to enable tracing to decode contract names: local or external.
@@ -1268,6 +1302,7 @@ mod tests {
         let mut config = ScriptConfig::<EthEvmNetwork>::new(
             Config::default(),
             evm_opts,
+            ResolvedNetworkProfile::default(),
             false,
             TempoOpts::default(),
             None,

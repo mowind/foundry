@@ -74,7 +74,7 @@ use foundry_evm::{
     traces::{CallTraceDecoderBuilder, identifier::SignaturesIdentifier},
     utils::get_blob_params,
 };
-use foundry_evm_networks::NetworkConfigs;
+use foundry_evm_networks::{NetworkConfigs, ResolvedNetworkProfile};
 use tempo_precompiles::TIP_FEE_MANAGER_ADDRESS;
 
 /// Default port the rpc will open
@@ -531,8 +531,12 @@ impl Default for NodeConfig {
 impl NodeConfig {
     /// Applies Tempo's safe default beneficiary for forked nodes while preserving
     /// explicit coinbase selections.
-    pub(crate) fn apply_tempo_fork_beneficiary_default<N>(&self, evm_env: &mut EvmEnv<N>) {
-        if self.networks.is_tempo()
+    pub(crate) fn apply_tempo_fork_beneficiary_default_with_network_profile<N>(
+        &self,
+        evm_env: &mut EvmEnv<N>,
+        network_profile: ResolvedNetworkProfile,
+    ) {
+        if network_profile.is_tempo()
             && !self.fork_urls.is_empty()
             && evm_env.block_env.beneficiary.is_zero()
         {
@@ -557,8 +561,14 @@ impl NodeConfig {
     ///
     /// In Tempo mode, uses the hardfork-specific base fee (10 gwei pre-T1, 20 gwei T1+).
     pub fn get_base_fee(&self) -> u64 {
-        let default = if self.networks.is_tempo() {
-            tempo_default_base_fee(TempoHardfork::from(self.get_hardfork()))
+        self.get_base_fee_with_network_profile(self.networks.resolve())
+    }
+
+    fn get_base_fee_with_network_profile(&self, network_profile: ResolvedNetworkProfile) -> u64 {
+        let default = if network_profile.is_tempo() {
+            tempo_default_base_fee(TempoHardfork::from(
+                self.get_hardfork_with_network_profile(network_profile),
+            ))
         } else {
             INITIAL_BASE_FEE
         };
@@ -571,8 +581,14 @@ impl NodeConfig {
     ///
     /// In Tempo mode, defaults to the hardfork-specific base fee.
     pub fn get_gas_price(&self) -> u128 {
-        let default = if self.networks.is_tempo() {
-            tempo_default_base_fee(TempoHardfork::from(self.get_hardfork())) as u128
+        self.get_gas_price_with_network_profile(self.networks.resolve())
+    }
+
+    fn get_gas_price_with_network_profile(&self, network_profile: ResolvedNetworkProfile) -> u128 {
+        let default = if network_profile.is_tempo() {
+            tempo_default_base_fee(TempoHardfork::from(
+                self.get_hardfork_with_network_profile(network_profile),
+            )) as u128
         } else {
             INITIAL_GAS_PRICE
         };
@@ -602,10 +618,17 @@ impl NodeConfig {
 
     /// Returns the hardfork to use
     pub fn get_hardfork(&self) -> FoundryHardfork {
+        self.get_hardfork_with_network_profile(self.networks.resolve())
+    }
+
+    pub(crate) fn get_hardfork_with_network_profile(
+        &self,
+        network_profile: ResolvedNetworkProfile,
+    ) -> FoundryHardfork {
         if let Some(hardfork) = self.hardfork {
             return hardfork;
         }
-        if self.networks.is_tempo()
+        if network_profile.is_tempo()
             && let Some(hardfork) = TempoHardfork::from_chain_and_timestamp(
                 self.get_chain_id(),
                 self.get_genesis_timestamp(),
@@ -614,10 +637,10 @@ impl NodeConfig {
             return hardfork.into();
         }
         #[cfg(feature = "optimism")]
-        if self.networks.is_optimism() {
+        if network_profile.is_optimism() {
             return foundry_evm::hardforks::OpHardfork::default().into();
         }
-        if self.networks.is_tempo() {
+        if network_profile.is_tempo() {
             return latest_active_tempo_hardfork().into();
         }
         EthereumHardfork::default().into()
@@ -1164,9 +1187,10 @@ impl NodeConfig {
             >,
     {
         // configure the revm environment
+        let network_profile = self.networks.resolve();
 
         let mut cfg = CfgEnv::default();
-        cfg.spec = self.get_hardfork().into();
+        cfg.spec = self.get_hardfork_with_network_profile(network_profile).into();
 
         cfg.chain_id = self.get_chain_id();
         cfg.limit_contract_code_size = self.code_size_limit;
@@ -1189,26 +1213,29 @@ impl NodeConfig {
             cfg,
             BlockEnv {
                 gas_limit: self.gas_limit(),
-                basefee: self.get_base_fee(),
+                basefee: self.get_base_fee_with_network_profile(network_profile),
                 ..Default::default()
             },
         );
 
-        self.apply_tempo_fork_beneficiary_default(&mut evm_env);
+        self.apply_tempo_fork_beneficiary_default_with_network_profile(
+            &mut evm_env,
+            network_profile,
+        );
 
         let genesis_timestamp = self.get_genesis_timestamp();
-        let base_fee_params: BaseFeeParams =
-            self.networks.resolve().base_fee_params(genesis_timestamp);
+        let base_fee_params: BaseFeeParams = network_profile.base_fee_params(genesis_timestamp);
 
         // On Tempo, the base fee follows the chain's hardfork rules instead of EIP-1559.
-        let tempo_hardfork =
-            self.networks.is_tempo().then(|| TempoHardfork::from(self.get_hardfork()));
+        let tempo_hardfork = network_profile
+            .is_tempo()
+            .then(|| TempoHardfork::from(self.get_hardfork_with_network_profile(network_profile)));
 
         let fees = FeeManager::new(
             spec_id,
-            self.get_base_fee(),
+            self.get_base_fee_with_network_profile(network_profile),
             !self.disable_min_priority_fee,
-            self.get_gas_price(),
+            self.get_gas_price_with_network_profile(network_profile),
             self.get_blob_excess_gas_and_price(),
             self.get_blob_params(),
             base_fee_params,
@@ -1217,7 +1244,7 @@ impl NodeConfig {
 
         let (db, fork): (Arc<TokioRwLock<Box<dyn Db>>>, Option<ClientFork>) =
             if let Some(eth_rpc_url) = self.fork_urls.first().cloned() {
-                self.setup_fork_db(eth_rpc_url, &mut evm_env, &fees).await?
+                self.setup_fork_db(eth_rpc_url, &mut evm_env, &fees, network_profile).await?
             } else {
                 let track_history = self.prune_history.is_state_history_supported();
                 (Arc::new(TokioRwLock::new(Box::new(StateRootDb::new(track_history)))), None)
@@ -1251,9 +1278,10 @@ impl NodeConfig {
             evm_env.block_env.timestamp = U256::from(genesis_timestamp);
         }
 
-        self.apply_tempo_fork_beneficiary_default(&mut evm_env);
-
-        let network_profile = self.networks.resolve();
+        self.apply_tempo_fork_beneficiary_default_with_network_profile(
+            &mut evm_env,
+            network_profile,
+        );
 
         let genesis = GenesisConfig {
             number: self.get_genesis_number(),
@@ -1263,9 +1291,10 @@ impl NodeConfig {
             genesis_init: self.genesis.clone(),
         };
 
-        let mut decoder_builder = CallTraceDecoderBuilder::new().with_tempo_hardfork(
-            network_profile.is_tempo().then(|| TempoHardfork::from(self.get_hardfork())),
-        );
+        let mut decoder_builder =
+            CallTraceDecoderBuilder::new().with_tempo_hardfork(network_profile.is_tempo().then(
+                || TempoHardfork::from(self.get_hardfork_with_network_profile(network_profile)),
+            ));
         if self.print_traces {
             // if traces should get printed we configure the decoder with the signatures cache
             if let Ok(identifier) = SignaturesIdentifier::new(false) {
@@ -1327,8 +1356,10 @@ impl NodeConfig {
         eth_rpc_url: String,
         evm_env: &mut EvmEnv,
         fees: &FeeManager,
+        network_profile: ResolvedNetworkProfile,
     ) -> Result<(Arc<TokioRwLock<Box<dyn Db>>>, Option<ClientFork>)> {
-        let (db, config) = self.setup_fork_db_config(eth_rpc_url, evm_env, fees).await?;
+        let (db, config) =
+            self.setup_fork_db_config(eth_rpc_url, evm_env, fees, network_profile).await?;
         let db: Arc<TokioRwLock<Box<dyn Db>>> = Arc::new(TokioRwLock::new(Box::new(db)));
         let fork = ClientFork::new(config, Arc::clone(&db));
         Ok((db, Some(fork)))
@@ -1344,6 +1375,7 @@ impl NodeConfig {
         eth_rpc_url: String,
         evm_env: &mut EvmEnv,
         fees: &FeeManager,
+        network_profile: ResolvedNetworkProfile,
     ) -> Result<(ForkedDatabase<AnyNetwork>, ClientForkConfig)> {
         debug!(target: "node", ?eth_rpc_url, "setting up fork db");
 
@@ -1453,8 +1485,10 @@ latest block number: {latest_block}"
 
         // The fee manager was built before the fork hardfork was known, so refresh the Tempo
         // hardfork it uses for base fee calculations.
-        if self.networks.is_tempo() {
-            fees.set_tempo_hardfork(Some(TempoHardfork::from(self.get_hardfork())));
+        if network_profile.is_tempo() {
+            fees.set_tempo_hardfork(Some(TempoHardfork::from(
+                self.get_hardfork_with_network_profile(network_profile),
+            )));
         }
 
         // if not set explicitly we use the base fee of the latest block
@@ -1511,7 +1545,7 @@ latest block number: {latest_block}"
         apply_chain_and_block_specific_env_changes::<AnyNetwork, _, _>(
             evm_env,
             &block,
-            self.networks.resolve(),
+            network_profile,
         );
 
         let meta = BlockchainDbMeta::new(cache_block_env, eth_rpc_url.clone());
