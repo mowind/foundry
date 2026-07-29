@@ -12,6 +12,9 @@ use alloy_chains::{
 use alloy_eips::eip1559::BaseFeeParams;
 use alloy_evm::precompiles::{DynPrecompile, Precompile, PrecompilesMap};
 use alloy_primitives::{Address, ChainId, address, map::AddressHashMap};
+
+#[cfg(feature = "hashkey")]
+use alloy_primitives::{B256, U256, b256};
 use clap::Parser;
 use foundry_evm_hardforks::{FoundryHardfork, TempoHardfork};
 use revm::precompile::{
@@ -33,6 +36,62 @@ pub mod celo;
 
 #[cfg(feature = "optimism")]
 mod optimism;
+
+/// HashKey B20 standalone local development activation admin.
+///
+/// This is a deterministic non-zero address used only for standalone local simulation;
+/// it is not a production HashKey parameter.
+#[cfg(feature = "hashkey")]
+pub const HSK_B20_LOCAL_ADMIN: Address = address!("CB00000000000000000000000000000000000000");
+
+/// B20 singleton addresses.
+#[cfg(feature = "hashkey")]
+mod b20_addresses {
+    use alloy_primitives::{Address, B256, address, b256};
+
+    /// `B20Factory` singleton precompile address.
+    pub const B20_FACTORY: Address = address!("B20F000000000000000000000000000000000000");
+    /// `ActivationRegistry` singleton precompile address.
+    pub const B20_ACTIVATION_REGISTRY: Address =
+        address!("8453000000000000000000000000000000000001");
+    /// `PolicyRegistry` singleton precompile address.
+    pub const B20_POLICY_REGISTRY: Address = address!("8453000000000000000000000000000000000002");
+
+    /// Canonical `keccak256([0xef])` code marker hash used by the B20 Factory.
+    pub const B20_MARKER_CODE_HASH: B256 =
+        b256!("309b8896ee4c1ff7ec1966155373dee42663b6b40c3fedc70ba501684848d2a3");
+
+    /// ERC-7201 namespace root for the ActivationRegistry.
+    ///
+    /// Computed as `keccak256("base.activation.registry.storage") - 1` per the upstream
+    /// derivation. See `optimism@149bcbfc:rust/b20/precompiles/src/activation/storage.rs`.
+    #[cfg(test)]
+    pub const ACTIVATION_REGISTRY_NS_ROOT: B256 =
+        b256!("43ee1bbe25e988521cccd8b2c8fbd38c8287ebff8e074e825a70dfd3885cce00");
+
+    /// Canonical feature IDs seeded to active in standalone local genesis.
+    #[cfg(test)]
+    pub const FEATURE_POLICY_REGISTRY: B256 =
+        b256!("b582ebae03f16fee49a6763f78df482fb11ae73f103ed0d330bbe556aa90a43f");
+    #[cfg(test)]
+    pub const FEATURE_B20_STABLECOIN: B256 =
+        b256!("ecfa0def2c10020caaf65e6155aa69c84b24892aaef76eeac52e0e2b3a0b8601");
+    #[cfg(test)]
+    pub const FEATURE_B20_ASSET: B256 =
+        b256!("cdcc772fe4cbdb1029f822861176d09e646db96723d4c1e82ddfdeb8163ef54c");
+
+    /// Computes the storage slot for a feature flag in the ActivationRegistry mapping.
+    ///
+    /// `keccak256(feature_id || ns_root)` where both are 32-byte big-endian.
+    #[cfg(test)]
+    pub fn feature_slot(feature_id: B256) -> B256 {
+        use alloy_primitives::keccak256;
+        let mut buf = [0u8; 64];
+        buf[..32].copy_from_slice(feature_id.as_slice());
+        buf[32..].copy_from_slice(ACTIVATION_REGISTRY_NS_ROOT.as_slice());
+        keccak256(buf)
+    }
+}
 
 const TEMPO_PRECOMPILES: &[(&str, Address)] = &[
     ("Nonce", NONCE_PRECOMPILE_ADDRESS),
@@ -152,6 +211,8 @@ pub enum NetworkVariant {
     #[cfg(feature = "optimism")]
     Optimism,
     Tempo,
+    #[cfg(feature = "hashkey")]
+    HashKey,
 }
 
 impl std::str::FromStr for NetworkVariant {
@@ -163,6 +224,8 @@ impl std::str::FromStr for NetworkVariant {
             #[cfg(feature = "optimism")]
             "optimism" => Ok(Self::Optimism),
             "tempo" => Ok(Self::Tempo),
+            #[cfg(feature = "hashkey")]
+            "hashkey" => Ok(Self::HashKey),
             _ => Err(format!("unknown network variant: {s}")),
         }
     }
@@ -185,6 +248,12 @@ impl NetworkVariant {
         matches!(self, Self::Tempo)
     }
 
+    /// Returns `true` if this is the HashKey network variant.
+    #[cfg(feature = "hashkey")]
+    pub const fn is_hashkey(&self) -> bool {
+        matches!(self, Self::HashKey)
+    }
+
     /// Returns the network variant name.
     pub const fn name(&self) -> &'static str {
         match self {
@@ -192,6 +261,8 @@ impl NetworkVariant {
             #[cfg(feature = "optimism")]
             Self::Optimism => "optimism",
             Self::Tempo => "tempo",
+            #[cfg(feature = "hashkey")]
+            Self::HashKey => "hashkey",
         }
     }
 }
@@ -265,6 +336,61 @@ pub enum NetworkStatePlan {
     None,
     /// Apply the existing Tempo state preparation path.
     Tempo,
+    /// Apply the HashKey B20 development genesis state.
+    #[cfg(feature = "hashkey")]
+    HashKey,
+}
+
+/// A singleton marker account and its storage seeds for the B20 standalone local genesis.
+#[cfg(feature = "hashkey")]
+#[derive(Clone, Debug)]
+pub struct B20GenesisAlloc {
+    /// Singleton marker accounts: `(address, code_hash, nonce)`.
+    pub markers: &'static [(Address, B256, u64)],
+    /// ActivationRegistry feature flag storage: `(address, slot, value)`.
+    pub feature_seeds: &'static [(Address, B256, U256)],
+}
+
+#[cfg(feature = "hashkey")]
+impl B20GenesisAlloc {
+    /// Returns the deterministic standalone local genesis alloc.
+    ///
+    /// B20 is active from timestamp `0`; the development admin is `HSK_B20_LOCAL_ADMIN`.
+    /// Three singletons get `0xef` marker code; three canonical feature flags are seeded active.
+    pub fn standalone_local() -> Self {
+        use b20_addresses::{
+            B20_ACTIVATION_REGISTRY, B20_FACTORY, B20_MARKER_CODE_HASH, B20_POLICY_REGISTRY,
+        };
+
+        static MARKERS: [(Address, B256, u64); 3] = [
+            (B20_FACTORY, B20_MARKER_CODE_HASH, 1),
+            (B20_ACTIVATION_REGISTRY, B20_MARKER_CODE_HASH, 1),
+            (B20_POLICY_REGISTRY, B20_MARKER_CODE_HASH, 1),
+        ];
+
+        // The feature mapping slots are keccak256(feature_id || ns_root).
+        // These values are verified in the unit test
+        // `feature_slot_derivation_matches_canonical_values`.
+        static FEATURE_SEEDS: [(Address, B256, U256); 3] = [
+            (
+                B20_ACTIVATION_REGISTRY,
+                b256!("8c5327ddcca092db72284503162323c6e8d392394b1d5c71991227bbc26f7c07"),
+                U256::from_limbs([1, 0, 0, 0]),
+            ),
+            (
+                B20_ACTIVATION_REGISTRY,
+                b256!("ca7c276524c5aeaac4d56c8a3d36eb5f9a64f60841fb65b539c99c21ca7df109"),
+                U256::from_limbs([1, 0, 0, 0]),
+            ),
+            (
+                B20_ACTIVATION_REGISTRY,
+                b256!("819420403a306232adb8ee78d9f35b5090371155b34376cf9b020e30029278e5"),
+                U256::from_limbs([1, 0, 0, 0]),
+            ),
+        ];
+
+        Self { markers: &MARKERS, feature_seeds: &FEATURE_SEEDS }
+    }
 }
 
 /// Error returned when two network extensions claim the same singleton precompile address.
@@ -323,6 +449,8 @@ pub struct ResolvedNetworkProfile {
     family: EvmFamily,
     celo: bool,
     bypass_prevrandao: bool,
+    #[cfg(feature = "hashkey")]
+    hashkey: bool,
 }
 
 impl ResolvedNetworkProfile {
@@ -333,7 +461,14 @@ impl ResolvedNetworkProfile {
 
     /// Returns the resolved profile name.
     pub const fn name(self) -> &'static str {
-        if self.celo { "celo" } else { self.family.name() }
+        #[cfg(feature = "hashkey")]
+        if self.hashkey {
+            return "hashkey";
+        }
+        if self.celo {
+            return "celo";
+        }
+        self.family.name()
     }
 
     /// Returns whether the Celo extension is enabled.
@@ -352,8 +487,42 @@ impl ResolvedNetworkProfile {
         matches!(self.family, EvmFamily::Optimism)
     }
 
+    /// Returns whether the HashKey B20 extension is enabled.
+    #[cfg(feature = "hashkey")]
+    pub const fn is_hashkey(self) -> bool {
+        self.hashkey
+    }
+
+    /// Returns the B20 consensus configuration for standalone local development.
+    #[cfg(feature = "hashkey")]
+    pub fn b20_config(self) -> hsk_b20_config::B20Config {
+        if self.hashkey {
+            hsk_b20_config::B20Config::new(Some(0), Some(HSK_B20_LOCAL_ADMIN))
+                .expect("standalone HashKey B20 config is always valid")
+        } else {
+            hsk_b20_config::B20Config::DISABLED
+        }
+    }
+
+    /// Returns the B20 standalone genesis alloc for non-fork execution.
+    ///
+    /// Contains three singleton `0xef` marker accounts and three ActivationRegistry
+    /// feature flag storage slots seeded to active. Returns `None` when the B20
+    /// extension is not enabled.
+    #[cfg(feature = "hashkey")]
+    pub fn b20_genesis_alloc(self) -> Option<B20GenesisAlloc> {
+        if !self.hashkey {
+            return None;
+        }
+        Some(B20GenesisAlloc::standalone_local())
+    }
+
     /// Returns the state preparation plan for this profile.
     pub const fn state_plan(self) -> NetworkStatePlan {
+        #[cfg(feature = "hashkey")]
+        if self.hashkey {
+            return NetworkStatePlan::HashKey;
+        }
         if self.is_tempo() { NetworkStatePlan::Tempo } else { NetworkStatePlan::None }
     }
 
@@ -420,6 +589,11 @@ impl ResolvedNetworkProfile {
             )?;
         }
 
+        #[cfg(feature = "hashkey")]
+        if self.hashkey {
+            self.inject_b20_precompiles(precompiles, context)?;
+        }
+
         if self.celo {
             precompiles.apply_precompile(&CELO_TRANSFER_ADDRESS, move |_| {
                 Some(celo::transfer::precompile())
@@ -435,6 +609,55 @@ impl ResolvedNetworkProfile {
             });
         }
 
+        Ok(())
+    }
+
+    /// Installs B20 singletons and dynamic lookup when the activation snapshot is active.
+    #[cfg(feature = "hashkey")]
+    fn inject_b20_precompiles(
+        self,
+        precompiles: &mut PrecompilesMap,
+        context: NetworkExecutionContext,
+    ) -> Result<(), PrecompileCompositionError> {
+        use b20_addresses::{B20_ACTIVATION_REGISTRY, B20_FACTORY, B20_POLICY_REGISTRY};
+
+        let config = self.b20_config();
+        if !config.is_active_at(context.timestamp) {
+            return Ok(());
+        }
+
+        // Fail-closed singleton collision check.
+        self.ensure_b20_singleton_free(precompiles, B20_FACTORY)?;
+        self.ensure_b20_singleton_free(precompiles, B20_ACTIVATION_REGISTRY)?;
+        self.ensure_b20_singleton_free(precompiles, B20_POLICY_REGISTRY)?;
+
+        use hsk_b20_precompiles::{
+            ActivationRegistry, B20Factory, B20Spec, BerylLookup, NoopPrecompileCallObserver,
+            PolicyRegistryPrecompile,
+        };
+
+        B20Factory::install_with_observer(precompiles, B20Spec::Beryl, NoopPrecompileCallObserver);
+        PolicyRegistryPrecompile::install(precompiles, B20Spec::Beryl);
+        ActivationRegistry::install(precompiles, config.activation_admin());
+        BerylLookup::install(precompiles);
+
+        Ok(())
+    }
+
+    #[cfg(feature = "hashkey")]
+    fn ensure_b20_singleton_free(
+        self,
+        precompiles: &PrecompilesMap,
+        address: Address,
+    ) -> Result<(), PrecompileCompositionError> {
+        if let Some(existing) = precompiles.get(&address) {
+            return Err(PrecompileCompositionError {
+                profile: self.name(),
+                address,
+                existing: existing.precompile_id().clone(),
+                requested: None,
+            });
+        }
         Ok(())
     }
 
@@ -466,6 +689,13 @@ impl ResolvedNetworkProfile {
         if self.celo {
             labels.insert(CELO_TRANSFER_ADDRESS, CELO_TRANSFER_LABEL.to_string());
         }
+        #[cfg(feature = "hashkey")]
+        if self.hashkey {
+            use b20_addresses::{B20_ACTIVATION_REGISTRY, B20_FACTORY, B20_POLICY_REGISTRY};
+            labels.insert(B20_FACTORY, "B20Factory".to_string());
+            labels.insert(B20_ACTIVATION_REGISTRY, "B20ActivationRegistry".to_string());
+            labels.insert(B20_POLICY_REGISTRY, "B20PolicyRegistry".to_string());
+        }
         if self.is_tempo() {
             labels.extend(
                 active_tempo_precompiles(tempo_hardfork)
@@ -484,6 +714,13 @@ impl ResolvedNetworkProfile {
         if self.celo {
             precompiles
                 .insert(PRECOMPILE_ID_CELO_TRANSFER.name().to_string(), CELO_TRANSFER_ADDRESS);
+        }
+        #[cfg(feature = "hashkey")]
+        if self.hashkey {
+            use b20_addresses::{B20_ACTIVATION_REGISTRY, B20_FACTORY, B20_POLICY_REGISTRY};
+            precompiles.insert("B20Factory".to_string(), B20_FACTORY);
+            precompiles.insert("B20ActivationRegistry".to_string(), B20_ACTIVATION_REGISTRY);
+            precompiles.insert("B20PolicyRegistry".to_string(), B20_POLICY_REGISTRY);
         }
         if self.is_tempo() {
             precompiles.extend(
@@ -550,6 +787,11 @@ impl NetworkConfigs {
         Self { network: Some(NetworkVariant::Tempo), tempo: true, ..Default::default() }
     }
 
+    #[cfg(feature = "hashkey")]
+    pub fn with_hashkey() -> Self {
+        Self { network: Some(NetworkVariant::HashKey), ..Default::default() }
+    }
+
     pub const fn is_tempo(&self) -> bool {
         if let Some(network) = self.resolved_network() { network.is_tempo() } else { false }
     }
@@ -564,12 +806,16 @@ impl NetworkConfigs {
             None | Some(NetworkVariant::Ethereum) => EvmFamily::Ethereum,
             #[cfg(feature = "optimism")]
             Some(NetworkVariant::Optimism) => EvmFamily::Optimism,
+            #[cfg(feature = "hashkey")]
+            Some(NetworkVariant::HashKey) => EvmFamily::Optimism,
             Some(NetworkVariant::Tempo) => EvmFamily::Tempo,
         };
         ResolvedNetworkProfile {
             family,
             celo: self.celo,
             bypass_prevrandao: self.bypass_prevrandao,
+            #[cfg(feature = "hashkey")]
+            hashkey: matches!(self.resolved_network(), Some(NetworkVariant::HashKey)),
         }
     }
 
@@ -653,6 +899,8 @@ impl From<NetworkVariant> for NetworkConfigs {
             NetworkVariant::Optimism => {
                 Self { network: Some(network), optimism: true, ..Default::default() }
             }
+            #[cfg(feature = "hashkey")]
+            NetworkVariant::HashKey => Self { network: Some(network), ..Default::default() },
         }
     }
 }
@@ -1008,6 +1256,177 @@ mod tests {
                 r#"{"network": "optimism", "celo": false, "bypass_prevrandao": false}"#;
             let cfg_optimism: NetworkConfigs = serde_json::from_str(json_optimism).unwrap();
             assert!(cfg_optimism.is_optimism());
+        }
+    }
+
+    #[cfg(feature = "hashkey")]
+    mod hashkey {
+        use super::*;
+        use alloy_primitives::b256;
+        use b20_addresses::{B20_ACTIVATION_REGISTRY, B20_FACTORY, B20_POLICY_REGISTRY};
+
+        #[test]
+        fn resolves_to_optimism_family_with_b20_extension() {
+            let profile = NetworkConfigs::with_hashkey().resolve();
+            assert!(profile.is_hashkey());
+            assert!(profile.is_optimism());
+            assert_eq!(profile.evm_family(), EvmFamily::Optimism);
+            assert_eq!(profile.name(), "hashkey");
+            assert_eq!(profile.state_plan(), NetworkStatePlan::HashKey);
+        }
+
+        #[test]
+        fn b20_config_is_always_active_at_genesis() {
+            let profile = NetworkConfigs::with_hashkey().resolve();
+            let config = profile.b20_config();
+            assert!(config.is_enabled());
+            assert!(config.is_active_at(0));
+            assert!(config.is_active_at(1));
+            assert_eq!(config.activation_admin(), Some(HSK_B20_LOCAL_ADMIN));
+        }
+
+        #[test]
+        fn injects_b20_singletons_and_lookup() {
+            let profile = NetworkConfigs::with_hashkey().resolve();
+            let mut precompiles =
+                PrecompilesMap::from_static(revm::precompile::Precompiles::prague());
+
+            profile
+                .inject_precompiles(&mut precompiles, NetworkExecutionContext::new(177, 0))
+                .unwrap();
+
+            assert!(precompiles.get(&B20_FACTORY).is_some());
+            assert!(precompiles.get(&B20_ACTIVATION_REGISTRY).is_some());
+            assert!(precompiles.get(&B20_POLICY_REGISTRY).is_some());
+        }
+
+        #[test]
+        fn b20_injection_rejects_singleton_conflict() {
+            let profile = NetworkConfigs::with_hashkey().resolve();
+            let mut precompiles =
+                PrecompilesMap::from_static(revm::precompile::Precompiles::prague());
+            precompiles.apply_precompile(&B20_FACTORY, {
+                move |_| {
+                    Some(DynPrecompile::new(
+                        PrecompileId::Custom(std::borrow::Cow::Borrowed("conflict-test")),
+                        |_| unreachable!(),
+                    ))
+                }
+            });
+
+            let err = profile
+                .inject_precompiles(&mut precompiles, NetworkExecutionContext::new(177, 0))
+                .unwrap_err();
+            assert_eq!(err.address(), B20_FACTORY);
+            assert_eq!(err.requested(), None);
+        }
+
+        #[test]
+        fn reports_b20_labels_and_inventory() {
+            let profile = NetworkConfigs::with_hashkey().resolve();
+            let labels = profile.precompile_labels(None);
+            assert_eq!(labels.get(&B20_FACTORY), Some(&"B20Factory".to_string()));
+            assert_eq!(
+                labels.get(&B20_ACTIVATION_REGISTRY),
+                Some(&"B20ActivationRegistry".to_string())
+            );
+            assert_eq!(labels.get(&B20_POLICY_REGISTRY), Some(&"B20PolicyRegistry".to_string()));
+
+            let inventory = profile.precompile_inventory(None);
+            assert_eq!(inventory.get("B20Factory"), Some(&B20_FACTORY));
+            assert_eq!(inventory.get("B20ActivationRegistry"), Some(&B20_ACTIVATION_REGISTRY));
+            assert_eq!(inventory.get("B20PolicyRegistry"), Some(&B20_POLICY_REGISTRY));
+        }
+
+        #[test]
+        fn active_network_name_hashkey() {
+            let cfg = NetworkConfigs::with_hashkey();
+            assert_eq!(cfg.active_network_name(), Some("hashkey"));
+        }
+
+        #[test]
+        fn serde_roundtrip_hashkey() {
+            let original = NetworkConfigs::with_hashkey();
+            let json = serde_json::to_string(&original).unwrap();
+            let restored: NetworkConfigs = serde_json::from_str(&json).unwrap();
+            let profile = restored.resolve();
+            assert!(profile.is_hashkey());
+            assert!(profile.is_optimism());
+        }
+
+        #[test]
+        fn serde_hashkey_field_deserialized() {
+            let json = r#"{"network": "hashkey", "celo": false, "bypass_prevrandao": false}"#;
+            let cfg: NetworkConfigs = serde_json::from_str(json).unwrap();
+            assert!(cfg.resolve().is_hashkey());
+        }
+
+        #[test]
+        fn feature_slot_derivation_matches_canonical_values() {
+            // The three canonical mapping slots verified against the upstream derivation
+            // (see docs/research/hashkey-b20-local-state-contract.md §2).
+            assert_eq!(
+                b20_addresses::feature_slot(b20_addresses::FEATURE_POLICY_REGISTRY),
+                b256!("8c5327ddcca092db72284503162323c6e8d392394b1d5c71991227bbc26f7c07")
+            );
+            assert_eq!(
+                b20_addresses::feature_slot(b20_addresses::FEATURE_B20_STABLECOIN),
+                b256!("ca7c276524c5aeaac4d56c8a3d36eb5f9a64f60841fb65b539c99c21ca7df109")
+            );
+            assert_eq!(
+                b20_addresses::feature_slot(b20_addresses::FEATURE_B20_ASSET),
+                b256!("819420403a306232adb8ee78d9f35b5090371155b34376cf9b020e30029278e5")
+            );
+        }
+
+        #[test]
+        fn genesis_alloc_has_three_markers_and_three_seeds() {
+            let profile = NetworkConfigs::with_hashkey().resolve();
+            let alloc = profile.b20_genesis_alloc().unwrap();
+            assert_eq!(alloc.markers.len(), 3);
+            assert_eq!(alloc.feature_seeds.len(), 3);
+            // All feature seeds must be active (value = 1).
+            for &(_, _, value) in alloc.feature_seeds {
+                assert_eq!(value, U256::from(1));
+            }
+            // All markers must have the canonical code hash and nonce 1.
+            for &(_, code_hash, nonce) in alloc.markers {
+                assert_eq!(code_hash, b20_addresses::B20_MARKER_CODE_HASH);
+                assert_eq!(nonce, 1);
+            }
+        }
+
+        #[test]
+        fn genesis_alloc_is_none_without_hashkey() {
+            let profile = ResolvedNetworkProfile::default();
+            assert!(profile.b20_genesis_alloc().is_none());
+        }
+
+        #[test]
+        fn normal_and_inspected_injection_produce_identical_precompile_ids() {
+            // Normal and inspected execution both call inject_precompiles with the same
+            // immutable profile and execution context. The resulting precompile identity at
+            // each singleton address must be identical, which is the structural basis for
+            // normal/inspected equivalence of B20 execution.
+            let profile = NetworkConfigs::with_hashkey().resolve();
+            let context = NetworkExecutionContext::new(177, 0);
+
+            let mut normal = PrecompilesMap::from_static(revm::precompile::Precompiles::prague());
+            profile.inject_precompiles(&mut normal, context).unwrap();
+
+            let mut inspected =
+                PrecompilesMap::from_static(revm::precompile::Precompiles::prague());
+            profile.inject_precompiles(&mut inspected, context).unwrap();
+
+            for &address in &[
+                b20_addresses::B20_FACTORY,
+                b20_addresses::B20_ACTIVATION_REGISTRY,
+                b20_addresses::B20_POLICY_REGISTRY,
+            ] {
+                let normal_id = normal.get(&address).unwrap().precompile_id().clone();
+                let inspected_id = inspected.get(&address).unwrap().precompile_id().clone();
+                assert_eq!(normal_id, inspected_id, "precompile id mismatch at {address}");
+            }
         }
     }
 }

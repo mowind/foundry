@@ -77,3 +77,4 @@ optimism = [
     "foundry-evm-fuzz/optimism",
     "foundry-evm-traces/optimism",
 ]
+hashkey = ["foundry-evm-networks/hashkey"]

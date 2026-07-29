@@ -949,6 +949,10 @@ pub async fn run_command(args: CastArgs) -> Result<()> {
                 Some(NetworkVariant::Optimism) => {
                     SimpleCast::decode_raw_transaction::<Optimism>(&tx)?
                 }
+                #[cfg(feature = "hashkey")]
+                Some(NetworkVariant::HashKey) => {
+                    SimpleCast::decode_raw_transaction::<Optimism>(&tx)?
+                }
                 Some(NetworkVariant::Tempo) => {
                     SimpleCast::decode_raw_transaction::<TempoNetwork>(&tx)?
                 }

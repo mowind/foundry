@@ -187,6 +187,10 @@ impl VerifyBytecodeArgs {
             NetworkVariant::Optimism => {
                 self.run_with_network_and_config::<OpEvmNetwork>(config, network_profile).await
             }
+            #[cfg(feature = "hashkey")]
+            NetworkVariant::HashKey => {
+                self.run_with_network_and_config::<OpEvmNetwork>(config, network_profile).await
+            }
             NetworkVariant::Tempo => {
                 self.run_with_network_and_config::<TempoEvmNetwork>(config, network_profile).await
             }

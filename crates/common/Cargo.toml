@@ -108,3 +108,4 @@ optimism = [
     "dep:op-alloy-rpc-types",
     "foundry-common-fmt/optimism",
 ]
+hashkey = []

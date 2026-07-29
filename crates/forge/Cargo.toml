@@ -145,3 +145,4 @@ optimism = [
     "forge-lint/optimism",
     "forge-sol-macro-gen/optimism",
 ]
+hashkey = ["foundry-evm-networks/hashkey", "foundry-evm/hashkey", "foundry-common/hashkey", "forge-verify/hashkey"]

@@ -381,17 +381,18 @@ alloy-hardforks = { version = "0.4.7", default-features = false }
 alloy-op-hardforks = { version = "0.4.7", default-features = false }
 
 ## alloy-core
-alloy-dyn-abi = "1.6.1"
-alloy-json-abi = "1.6.1"
-alloy-primitives = { version = "1.6.1", features = [
+## Pinned to =1.6.0 to align with the HashKey B20 semantic baseline (TraceBundy/optimism@149bcbfc).
+alloy-dyn-abi = "=1.6.0"
+alloy-json-abi = "=1.6.0"
+alloy-primitives = { version = "=1.6.0", features = [
     "getrandom",
     "rand",
     "map-fxhash",
     "map-foldhash",
 ] }
-alloy-sol-macro-expander = "1.6.1"
-alloy-sol-macro-input = "1.6.1"
-alloy-sol-types = "1.6.1"
+alloy-sol-macro-expander = "=1.6.0"
+alloy-sol-macro-input = "=1.6.0"
+alloy-sol-types = "=1.6.0"
 
 alloy-chains = "0.2"
 alloy-rlp = "0.3"
@@ -411,6 +412,11 @@ alloy-op-evm = "0.32.0"
 revm = { version = "41.0.0", default-features = false }
 revm-inspectors = { version = "0.41.1", features = ["serde"] }
 op-revm = { version = "20.0.0", default-features = false }
+
+# hashkey
+# B20 semantic baseline pinned to the exact TraceBundy/optimism revision.
+hsk-b20-config = { git = "https://github.com/TraceBundy/optimism", rev = "149bcbfc8c5d5ba6d167e4d27e7d72f3b7ffa2d8", default-features = false }
+hsk-b20-precompiles = { git = "https://github.com/TraceBundy/optimism", rev = "149bcbfc8c5d5ba6d167e4d27e7d72f3b7ffa2d8", default-features = false }
 
 ## cli
 anstream = "1.0"
@@ -516,20 +522,21 @@ mpp = { git = "https://github.com/tempoxyz/mpp-rs", rev = "3fdec6a9178a3e507a740
     "reqwest-rustls-tls",
     "ws",
 ] }
-tempo-hardfork = { git = "https://github.com/tempoxyz/tempo", rev = "cf4e08013c0d6c537364f053462807ec42d4056a", default-features = false, features = [
+## Tempo crates aligned to alloy-core 1.6.0 via local compatibility spike worktree.
+tempo-hardfork = { path = "../tempo-spike-alloy-core-1.6.0/crates/hardfork", default-features = false, features = [
     "serde",
     "std",
 ] }
-tempo-primitives = { git = "https://github.com/tempoxyz/tempo", rev = "cf4e08013c0d6c537364f053462807ec42d4056a", default-features = false, features = [
+tempo-primitives = { path = "../tempo-spike-alloy-core-1.6.0/crates/primitives", default-features = false, features = [
     "serde",
 ] }
-tempo-alloy = { git = "https://github.com/tempoxyz/tempo", rev = "cf4e08013c0d6c537364f053462807ec42d4056a", default-features = false }
-tempo-evm = { git = "https://github.com/tempoxyz/tempo", rev = "cf4e08013c0d6c537364f053462807ec42d4056a", default-features = false }
-tempo-revm = { git = "https://github.com/tempoxyz/tempo", rev = "cf4e08013c0d6c537364f053462807ec42d4056a", default-features = false, features = [
+tempo-alloy = { path = "../tempo-spike-alloy-core-1.6.0/crates/alloy", default-features = false }
+tempo-evm = { path = "../tempo-spike-alloy-core-1.6.0/crates/evm", default-features = false }
+tempo-revm = { path = "../tempo-spike-alloy-core-1.6.0/crates/revm", default-features = false, features = [
     "serde",
 ] }
-tempo-contracts = { git = "https://github.com/tempoxyz/tempo", rev = "cf4e08013c0d6c537364f053462807ec42d4056a" }
-tempo-precompiles = { git = "https://github.com/tempoxyz/tempo", rev = "cf4e08013c0d6c537364f053462807ec42d4056a" }
+tempo-contracts = { path = "../tempo-spike-alloy-core-1.6.0/crates/contracts" }
+tempo-precompiles = { path = "../tempo-spike-alloy-core-1.6.0/crates/precompiles" }
 
 ## Pinned dependencies. Enabled for the workspace in crates/test-utils.
 
@@ -618,10 +625,31 @@ commonware-runtime = { git = "https://github.com/commonwarexyz/monorepo", rev = 
 commonware-storage = { git = "https://github.com/commonwarexyz/monorepo", rev = "2a7dd423f0a241276a5a38db8cc3d05f11de0c03" }
 commonware-utils = { git = "https://github.com/commonwarexyz/monorepo", rev = "2a7dd423f0a241276a5a38db8cc3d05f11de0c03" }
 
-## tempo — unify crates.io versions (pulled by mpp/foundry-wallets) with git rev
-tempo-primitives = { git = "https://github.com/tempoxyz/tempo", rev = "cf4e08013c0d6c537364f053462807ec42d4056a" }
-tempo-alloy = { git = "https://github.com/tempoxyz/tempo", rev = "cf4e08013c0d6c537364f053462807ec42d4056a" }
-tempo-contracts = { git = "https://github.com/tempoxyz/tempo", rev = "cf4e08013c0d6c537364f053462807ec42d4056a" }
+## tempo — unify crates.io versions (pulled by mpp/foundry-wallets) with local alloy-core 1.6.0 spike
+tempo-primitives = { path = "../tempo-spike-alloy-core-1.6.0/crates/primitives" }
+tempo-alloy = { path = "../tempo-spike-alloy-core-1.6.0/crates/alloy" }
+tempo-contracts = { path = "../tempo-spike-alloy-core-1.6.0/crates/contracts" }
+
+[patch."https://github.com/tempoxyz/tempo"]
+tempo-hardfork = { path = "../tempo-spike-alloy-core-1.6.0/crates/hardfork" }
+tempo-primitives = { path = "../tempo-spike-alloy-core-1.6.0/crates/primitives" }
+tempo-alloy = { path = "../tempo-spike-alloy-core-1.6.0/crates/alloy" }
+tempo-evm = { path = "../tempo-spike-alloy-core-1.6.0/crates/evm" }
+tempo-revm = { path = "../tempo-spike-alloy-core-1.6.0/crates/revm" }
+tempo-contracts = { path = "../tempo-spike-alloy-core-1.6.0/crates/contracts" }
+tempo-precompiles = { path = "../tempo-spike-alloy-core-1.6.0/crates/precompiles" }
+
+[patch."https://github.com/paradigmxyz/reth"]
+reth-chainspec = { path = "../reth-spike-alloy-core-1.6.0/crates/chainspec" }
+reth-consensus-common = { path = "../reth-spike-alloy-core-1.6.0/crates/consensus/common" }
+reth-consensus = { path = "../reth-spike-alloy-core-1.6.0/crates/consensus/consensus" }
+reth-ethereum-consensus = { path = "../reth-spike-alloy-core-1.6.0/crates/ethereum/consensus" }
+reth-evm-ethereum = { path = "../reth-spike-alloy-core-1.6.0/crates/ethereum/evm" }
+reth-evm = { path = "../reth-spike-alloy-core-1.6.0/crates/evm/evm" }
+reth-ethereum-primitives = { path = "../reth-spike-alloy-core-1.6.0/crates/ethereum/primitives" }
+reth-network-peers = { path = "../reth-spike-alloy-core-1.6.0/crates/net/peers" }
+reth-revm = { path = "../reth-spike-alloy-core-1.6.0/crates/revm" }
+reth-storage-api = { path = "../reth-spike-alloy-core-1.6.0/crates/storage/storage-api" }
 
 [workspace.metadata.cargo-shear]
 ignored = ["idna_adapter", "cast", "chisel", "forge", "alloy-contract"]

@@ -179,6 +179,34 @@ impl<FEN: FoundryEvmNetwork> Executor<FEN> {
             }
         }
 
+        // Seed the B20 standalone local genesis once at executor creation: three singleton
+        // marker accounts and three ActivationRegistry feature flags seeded active. Fork mode
+        // preserves remote state and does not seed.
+        #[cfg(feature = "hashkey")]
+        if !backend.is_in_forking_mode()
+            && let Some(alloc) = inspector.network_profile.b20_genesis_alloc()
+        {
+            for &(address, code_hash, nonce) in alloc.markers {
+                let account = backend.basic_ref(address).unwrap_or_default().unwrap_or_default();
+                backend.insert_account_info(
+                    address,
+                    revm::state::AccountInfo {
+                        code: Some(Bytecode::new_raw(Bytes::from_static(&[0xef]))),
+                        code_hash,
+                        nonce,
+                        ..account
+                    },
+                );
+            }
+            for &(address, slot, value) in alloc.feature_seeds {
+                let _ = backend.insert_account_storage(
+                    address,
+                    U256::from_be_bytes(slot.into()),
+                    value,
+                );
+            }
+        }
+
         Self {
             backend: Arc::new(backend),
             evm_env,

@@ -13,6 +13,7 @@ BIN_DIR = dist/bin
 CARGO_TARGET_DIR ?= target
 
 # List of features to use when building. Can be overridden via the environment.
+# HSKChain builds add `hashkey` to enable B20 native precompile support.
 # No jemalloc on Windows
 ifeq ($(OS),Windows_NT)
     FEATURES ?= aws-kms gcp-kms turnkey cli asm-keccak

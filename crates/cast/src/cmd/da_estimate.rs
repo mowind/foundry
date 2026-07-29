@@ -37,7 +37,10 @@ impl DAEstimateArgs {
             }
         };
         match network {
+            #[cfg(feature = "optimism")]
             NetworkVariant::Optimism => da_estimate::<Optimism>(&config, block).await,
+            #[cfg(feature = "hashkey")]
+            NetworkVariant::HashKey => da_estimate::<Optimism>(&config, block).await,
             NetworkVariant::Ethereum => da_estimate::<Ethereum>(&config, block).await,
             NetworkVariant::Tempo => Err(eyre::eyre!(
                 "DA estimation is not supported for Tempo: EIP-4844 blob transactions are not available on this network"
