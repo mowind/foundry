@@ -715,6 +715,7 @@ impl Cheatcode for etchCall {
         let Self { target, newRuntimeBytecode } = self;
         ccx.ensure_not_precompile(target)?;
         ccx.ecx.journal_mut().load_account(*target)?;
+        ensure_not_b20_protected(ccx, *target)?;
         let bytecode = Bytecode::new_raw_checked(newRuntimeBytecode.clone())
             .map_err(|e| fmt_err!("failed to create bytecode: {e}"))?;
         if *target == HISTORY_STORAGE_ADDRESS
@@ -777,6 +778,7 @@ impl Cheatcode for storeCall {
         let Self { target, slot, value } = *self;
         ccx.ensure_not_precompile(&target)?;
         ensure_loaded_account(ccx.ecx, target)?;
+        ensure_not_b20_protected(ccx, target)?;
         ccx.ecx
             .journal_mut()
             .sstore(target, slot.into(), value.into())
@@ -1774,6 +1776,31 @@ pub(super) fn ensure_loaded_account<CTX: ContextTr<Db: Database<Error = Database
 ) -> Result<()> {
     ecx.journal_mut().load_account(addr)?;
     ecx.journal_mut().touch_account(addr);
+    Ok(())
+}
+
+/// Rejects `vm.store` / `vm.etch` against B20-protected accounts.
+///
+/// Under the HashKey B20 standalone local profile the fixed singletons and
+/// Factory-initialized dynamic tokens carry the canonical `0xef` marker and must
+/// not be mutated through cheatcodes. Uninitialized `0xb2...` structural addresses
+/// keep ordinary account semantics and remain writable. No-op when the B20
+/// extension is not enabled.
+pub(super) fn ensure_not_b20_protected<FEN: FoundryEvmNetwork>(
+    ccx: &CheatsCtxt<'_, '_, FEN>,
+    target: Address,
+) -> Result<()> {
+    let code_hash = ccx
+        .ecx
+        .journal()
+        .evm_state()
+        .get(&target)
+        .map(|account| account.info.code_hash)
+        .unwrap_or(KECCAK_EMPTY);
+    ensure!(
+        !ccx.ecx.db().network_profile().is_b20_protected(target, code_hash),
+        "B20 protected account {target} cannot be mutated with vm.store/vm.etch"
+    );
     Ok(())
 }
 

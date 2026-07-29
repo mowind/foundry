@@ -11,10 +11,10 @@ use alloy_chains::{
 };
 use alloy_eips::eip1559::BaseFeeParams;
 use alloy_evm::precompiles::{DynPrecompile, Precompile, PrecompilesMap};
-use alloy_primitives::{Address, ChainId, address, map::AddressHashMap};
+use alloy_primitives::{Address, B256, ChainId, address, map::AddressHashMap};
 
 #[cfg(feature = "hashkey")]
-use alloy_primitives::{B256, U256, b256};
+use alloy_primitives::{U256, b256};
 use clap::Parser;
 use foundry_evm_hardforks::{FoundryHardfork, TempoHardfork};
 use revm::precompile::{
@@ -524,6 +524,48 @@ impl ResolvedNetworkProfile {
             return NetworkStatePlan::HashKey;
         }
         if self.is_tempo() { NetworkStatePlan::Tempo } else { NetworkStatePlan::None }
+    }
+
+    /// Returns whether `address` is protected from direct `vm.store` / `vm.etch`
+    /// mutation under this profile's B20 standalone local semantics.
+    ///
+    /// Protected targets:
+    /// - The three fixed B20 singleton precompiles (`B20Factory`, `ActivationRegistry`,
+    ///   `PolicyRegistry`).
+    /// - A canonical B20 dynamic token whose current account code hash equals the canonical `0xef`
+    ///   marker, i.e. initialized by the Factory.
+    ///
+    /// Uninitialized `0xb2...` structural addresses are *not* protected: they behave
+    /// as ordinary accounts until the Factory atomically initializes them, and revert
+    /// of an initialized token's marker automatically restores that address to the
+    /// unprotected state.
+    ///
+    /// `code_hash` is the current account's code hash (`KECCAK_EMPTY` for a non-existent
+    /// account). Returns `false` for every address when the B20 extension is not enabled.
+    #[cfg_attr(not(feature = "hashkey"), expect(clippy::missing_const_for_fn))]
+    pub fn is_b20_protected(self, address: Address, code_hash: B256) -> bool {
+        #[cfg(feature = "hashkey")]
+        if self.hashkey {
+            return self.is_b20_protected_inner(address, code_hash);
+        }
+        let _ = (address, code_hash);
+        false
+    }
+
+    #[cfg(feature = "hashkey")]
+    fn is_b20_protected_inner(self, address: Address, code_hash: B256) -> bool {
+        use b20_addresses::{
+            B20_ACTIVATION_REGISTRY, B20_FACTORY, B20_MARKER_CODE_HASH, B20_POLICY_REGISTRY,
+        };
+
+        if matches!(address, B20_FACTORY | B20_ACTIVATION_REGISTRY | B20_POLICY_REGISTRY) {
+            return true;
+        }
+        // An initialized dynamic token carries the canonical marker code hash at a
+        // canonical variant address. Uninitialized `0xb2` addresses carry a different
+        // (empty) code hash and remain unprotected.
+        code_hash == B20_MARKER_CODE_HASH
+            && hsk_b20_precompiles::B20Variant::from_address(address).is_some()
     }
 
     /// Returns the base fee parameters for this profile.
@@ -1262,7 +1304,7 @@ mod tests {
     #[cfg(feature = "hashkey")]
     mod hashkey {
         use super::*;
-        use alloy_primitives::b256;
+        use alloy_primitives::{b256, keccak256};
         use b20_addresses::{B20_ACTIVATION_REGISTRY, B20_FACTORY, B20_POLICY_REGISTRY};
 
         #[test]
@@ -1427,6 +1469,81 @@ mod tests {
                 let inspected_id = inspected.get(&address).unwrap().precompile_id().clone();
                 assert_eq!(normal_id, inspected_id, "precompile id mismatch at {address}");
             }
+        }
+
+        #[test]
+        fn protection_is_noop_without_hashkey_profile() {
+            // Non-hashkey profiles never protect any address, regardless of code hash.
+            let profile = ResolvedNetworkProfile::default();
+            assert!(
+                !profile.is_b20_protected(
+                    b20_addresses::B20_FACTORY,
+                    b20_addresses::B20_MARKER_CODE_HASH
+                )
+            );
+            assert!(!profile.is_b20_protected(Address::ZERO, B256::ZERO));
+        }
+
+        #[test]
+        fn protection_blocks_fixed_singletons() {
+            let profile = NetworkConfigs::with_hashkey().resolve();
+            // Singletons are protected regardless of code hash.
+            for &address in &[
+                b20_addresses::B20_FACTORY,
+                b20_addresses::B20_ACTIVATION_REGISTRY,
+                b20_addresses::B20_POLICY_REGISTRY,
+            ] {
+                assert!(
+                    profile.is_b20_protected(address, B256::ZERO),
+                    "singleton {address} should be protected"
+                );
+            }
+        }
+
+        #[test]
+        fn protection_blocks_initialized_dynamic_token() {
+            let profile = NetworkConfigs::with_hashkey().resolve();
+            // A canonical variant address carrying the marker code hash is initialized
+            // and must be protected. Built from the same structural prefix the Factory uses.
+            // b2 | 00..00 (9) | variant | tail(9 from keccak). Use Asset variant = 0x00.
+            let mut bytes = [0u8; 20];
+            bytes[0] = 0xb2;
+            bytes[10] = 0x00; // Asset discriminant
+            let tail = keccak256([0u8; 32]);
+            bytes[11..].copy_from_slice(&tail.as_slice()[..9]);
+            let token = Address::from(bytes);
+            assert!(profile.is_b20_protected(token, b20_addresses::B20_MARKER_CODE_HASH));
+        }
+
+        #[test]
+        fn protection_allows_uninitialized_dynamic_address() {
+            let profile = NetworkConfigs::with_hashkey().resolve();
+            // A canonical variant address WITHOUT the marker is uninitialized and must
+            // remain writable as an ordinary account.
+            let mut bytes = [0u8; 20];
+            bytes[0] = 0xb2;
+            bytes[10] = 0x01; // Stablecoin discriminant
+            let tail = keccak256([1u8; 32]);
+            bytes[11..].copy_from_slice(&tail.as_slice()[..9]);
+            let uninitialized = Address::from(bytes);
+            assert!(!profile.is_b20_protected(uninitialized, B256::ZERO));
+            // Non-canonical prefix (first byte != 0xb2) is never protected by B20.
+            assert!(!profile.is_b20_protected(Address::ZERO, b20_addresses::B20_MARKER_CODE_HASH));
+        }
+
+        #[test]
+        fn protection_allows_b2_prefix_with_unsupported_variant() {
+            let profile = NetworkConfigs::with_hashkey().resolve();
+            // Prefix byte 0xb2 with the required zero run but an unsupported variant
+            // discriminant is not a canonical token address and stays unprotected even
+            // if it somehow carried the marker hash.
+            let mut bytes = [0u8; 20];
+            bytes[0] = 0xb2;
+            bytes[10] = 0x09; // unsupported variant
+            let tail = keccak256([2u8; 32]);
+            bytes[11..].copy_from_slice(&tail.as_slice()[..9]);
+            let noncanonical = Address::from(bytes);
+            assert!(!profile.is_b20_protected(noncanonical, b20_addresses::B20_MARKER_CODE_HASH));
         }
     }
 }

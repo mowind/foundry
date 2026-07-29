@@ -39,7 +39,8 @@ contract B20AssetTest is Test {
 
     /// The deterministic address computed by getB20Address must match the actual creation.
     function testDeterministicAddress() public {
-        address predicted = caller.predictAssetAddress(address(caller), SALT);
+        address predicted =
+            caller.predictAddress(IB20Factory.B20Variant.ASSET, address(caller), SALT);
         address actual = caller.createAsset(SALT, "DetAsset", "DET", address(this));
         assertEq(predicted, actual, "deterministic address mismatch");
     }
