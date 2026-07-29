@@ -135,4 +135,10 @@ optimism = [
     "foundry-evm/optimism",
     "foundry-cli/optimism",
 ]
-hashkey = ["foundry-evm-networks/hashkey", "foundry-evm/hashkey", "foundry-common/hashkey"]
+hashkey = [
+    "optimism",
+    "anvil/hashkey",
+    "foundry-evm-networks/hashkey",
+    "foundry-evm/hashkey",
+    "foundry-common/hashkey",
+]

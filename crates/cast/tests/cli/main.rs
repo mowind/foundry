@@ -35,6 +35,8 @@ use tempo_primitives::{
 extern crate foundry_test_utils;
 
 mod erc20;
+#[cfg(feature = "hashkey")]
+mod hashkey;
 mod keychain;
 mod selectors;
 mod tempo;

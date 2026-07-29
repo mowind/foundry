@@ -152,4 +152,4 @@ cmd = [
     "tokio/signal",
 ]
 js-tracer = ["revm-inspectors/js-tracer"]
-hashkey = ["foundry-evm-networks/hashkey", "foundry-evm/hashkey", "foundry-common/hashkey"]
+hashkey = ["optimism", "foundry-evm-networks/hashkey", "foundry-evm/hashkey", "foundry-common/hashkey"]

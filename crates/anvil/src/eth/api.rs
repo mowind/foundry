@@ -1586,7 +1586,7 @@ impl EthApi<FoundryNetwork> {
                 // safe: value <= available_funds
                 available_funds -= value;
             }
-            if gas_price > 0 {
+            if gas_price > 0 && !self.is_impersonated(from) {
                 // amount of gas the sender can afford with the `gas_price`
                 let allowance =
                     available_funds.checked_div(U256::from(gas_price)).unwrap_or_default();

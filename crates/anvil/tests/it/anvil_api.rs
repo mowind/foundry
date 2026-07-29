@@ -120,6 +120,34 @@ async fn can_impersonate_account() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn can_impersonate_zero_balance_account() {
+    let (api, handle) = spawn(NodeConfig::test()).await;
+    let provider = handle.http_provider();
+    let impersonate = Address::random();
+
+    assert_eq!(provider.get_balance(impersonate).await.unwrap(), U256::ZERO);
+    api.anvil_impersonate_account(impersonate).await.unwrap();
+
+    let tx = TransactionRequest::default().with_from(impersonate).with_to(Address::random());
+    let receipt = provider
+        .send_transaction(WithOtherFields::new(tx))
+        .await
+        .unwrap()
+        .get_receipt()
+        .await
+        .unwrap();
+
+    assert_eq!(receipt.from, impersonate);
+    assert_eq!(provider.get_balance(impersonate).await.unwrap(), U256::ZERO);
+
+    let value_tx = TransactionRequest::default()
+        .with_from(impersonate)
+        .with_to(Address::random())
+        .with_value(U256::ONE);
+    provider.send_transaction(WithOtherFields::new(value_tx)).await.unwrap_err();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn can_auto_impersonate_account() {
     let (api, handle) = spawn(NodeConfig::test()).await;
 

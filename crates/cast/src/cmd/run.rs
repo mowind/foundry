@@ -51,7 +51,7 @@ use foundry_evm::{
     opts::EvmOpts,
     traces::{InternalTraceMode, SparsedTraceArena, TraceRequirements, Traces},
 };
-use foundry_evm_networks::ResolvedNetworkProfile;
+use foundry_evm_networks::{NetworkConfigs, ResolvedNetworkProfile};
 use futures::TryFutureExt;
 use revm::{DatabaseRef, context::Block, primitives::hardfork::SpecId};
 
@@ -116,6 +116,10 @@ pub struct RunArgs {
 
     #[command(flatten)]
     rpc: RpcOpts,
+
+    /// Network selection.
+    #[command(flatten)]
+    networks: NetworkConfigs,
 
     /// The EVM version to use.
     ///
@@ -690,6 +694,9 @@ impl figment::Provider for RunArgs {
         if let Some(evm_version) = self.evm_version {
             map.insert("evm_version".into(), figment::value::Value::serialize(evm_version)?);
         }
+        if let Some(network) = self.networks.active_network_name() {
+            map.insert("network".into(), network.into());
+        }
 
         Ok(Map::from([(Config::selected_profile(), map)]))
     }
@@ -707,6 +714,14 @@ mod tests {
         let args = RunArgs::parse_from(["cast run", "0x00", "-l", &label]);
 
         assert_eq!(args.legacy_labels, vec![label]);
+    }
+
+    #[cfg(feature = "hashkey")]
+    #[test]
+    fn parses_hashkey_network() {
+        let args = RunArgs::parse_from(["cast run", "0x00", "--network", "hashkey"]);
+
+        assert_eq!(args.networks.active_network_name(), Some("hashkey"));
     }
 
     #[test]
