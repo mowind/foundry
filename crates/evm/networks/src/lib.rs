@@ -371,12 +371,12 @@ impl NetworkTraceIdentity {
         {
             use b20_addresses::{B20_ACTIVATION_REGISTRY, B20_FACTORY, B20_POLICY_REGISTRY};
 
-            return match self {
+            match self {
                 Self::B20Factory => Some(B20_FACTORY),
                 Self::B20ActivationRegistry => Some(B20_ACTIVATION_REGISTRY),
                 Self::B20PolicyRegistry => Some(B20_POLICY_REGISTRY),
                 Self::B20Asset | Self::B20Stablecoin => None,
-            };
+            }
         }
         #[cfg(not(feature = "hashkey"))]
         match self {}
@@ -391,7 +391,7 @@ impl NetworkTraceIdentity {
                 NetworkTraceIdentity::B20ActivationRegistry,
                 NetworkTraceIdentity::B20PolicyRegistry,
             ];
-            return IDENTITIES;
+            IDENTITIES
         }
         #[cfg(not(feature = "hashkey"))]
         &[]
@@ -596,8 +596,10 @@ impl ResolvedNetworkProfile {
         None
     }
 
-    #[cfg(all(test, feature = "hashkey"))]
-    fn with_b20_config(mut self, config: hsk_b20_config::B20Config) -> Self {
+    /// Overrides the resolved B20 config for activation-boundary conformance tests.
+    #[doc(hidden)]
+    #[cfg(all(feature = "hashkey", any(test, feature = "test-utils")))]
+    pub const fn with_b20_config_for_test(mut self, config: hsk_b20_config::B20Config) -> Self {
         self.b20_activation_time = config.activation_time();
         self.b20_activation_admin = config.activation_admin();
         self
@@ -1447,7 +1449,7 @@ mod tests {
             let config =
                 hsk_b20_config::B20Config::new(Some(100), Some(Address::repeat_byte(0x11)))
                     .unwrap();
-            let profile = NetworkConfigs::with_hashkey().resolve().with_b20_config(config);
+            let profile = NetworkConfigs::with_hashkey().resolve().with_b20_config_for_test(config);
             let asset = hsk_b20_precompiles::B20Variant::Asset
                 .compute_address(Address::repeat_byte(0x22), B256::repeat_byte(0x33))
                 .0;
@@ -1461,6 +1463,30 @@ mod tests {
                 profile.trace_identity(asset, NetworkExecutionContext::new(177, 101)),
                 Some(NetworkTraceIdentity::B20Asset)
             );
+        }
+
+        #[test]
+        fn activation_boundary_is_inclusive() {
+            let config =
+                hsk_b20_config::B20Config::new(Some(100), Some(Address::repeat_byte(0x11)))
+                    .unwrap();
+            let profile = NetworkConfigs::with_hashkey().resolve().with_b20_config_for_test(config);
+
+            for (timestamp, active) in [(99, false), (100, true), (101, true)] {
+                let mut precompiles =
+                    PrecompilesMap::from_static(revm::precompile::Precompiles::prague());
+                profile
+                    .inject_precompiles(
+                        &mut precompiles,
+                        NetworkExecutionContext::new(177, timestamp),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    precompiles.get(&B20_FACTORY).is_some(),
+                    active,
+                    "timestamp {timestamp}"
+                );
+            }
         }
 
         #[test]

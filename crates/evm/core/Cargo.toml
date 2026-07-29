@@ -84,7 +84,10 @@ alloy-serde.workspace = true
 alloy-signer.workspace = true
 alloy-signer-local.workspace = true
 anvil.workspace = true
+foundry-evm-networks = { workspace = true, features = ["test-utils"] }
 foundry-test-utils.workspace = true
+hsk-b20-config = { workspace = true, features = ["std"] }
+hsk-b20-precompiles = { workspace = true, features = ["std"] }
 tempo-primitives.workspace = true
 
 [features]
@@ -99,3 +102,4 @@ optimism = [
     "foundry-evm-hardforks/optimism",
     "foundry-evm-networks/optimism",
 ]
+hashkey = ["optimism", "foundry-evm-networks/hashkey"]

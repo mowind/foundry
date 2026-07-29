@@ -5777,6 +5777,8 @@ dependencies = [
  "foundry-fork-db",
  "foundry-test-utils",
  "futures",
+ "hsk-b20-config",
+ "hsk-b20-precompiles",
  "itertools 0.15.0",
  "op-alloy-consensus",
  "op-alloy-network",

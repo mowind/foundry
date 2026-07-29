@@ -55,3 +55,4 @@ default = ["optimism"]
 optimism = ["dep:alloy-op-hardforks", "foundry-evm-hardforks/optimism"]
 # HashKey B20 build capability: depends on Optimism support and isolates the B20 dependency graph.
 hashkey = ["optimism", "dep:hsk-b20-config", "dep:hsk-b20-precompiles"]
+test-utils = []

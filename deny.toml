@@ -117,4 +117,6 @@ allow-git = [
     # Temporary: OP crates until upstream optimism bumps to revm 40.
     "https://github.com/foundry-rs/optimism",
     "https://github.com/foundry-rs/op-revm",
+    # HashKey B20 semantic baseline; the exact revision is enforced by the release gate.
+    "https://github.com/TraceBundy/optimism",
 ]
