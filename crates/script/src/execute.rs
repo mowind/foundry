@@ -35,6 +35,7 @@ use foundry_evm::{
         prune_trace_depth, render_trace_arena_inner, trace_arena_at_depth,
     },
 };
+use foundry_evm_networks::NetworkExecutionContext;
 use foundry_wallets::wallet_browser::signer::BrowserSigner;
 use futures::future::join_all;
 use itertools::Itertools;
@@ -373,10 +374,15 @@ impl<FEN: FoundryEvmNetwork> ExecutedState<FEN> {
             || chain_id.as_ref().is_some_and(|chain| chain.is_tempo());
         let mut tracing = self.script_config.config.tracing.clone();
         tracing.labels.extend(self.execution_result.labeled_addresses.clone());
+        let network_context = NetworkExecutionContext::new(
+            self.script_config.evm_opts.env.chain_id.unwrap_or(31337),
+            self.script_config.evm_opts.env.block_timestamp.saturating_to(),
+        );
 
         let mut decoder = CallTraceDecoderBuilder::new()
             .with_tracing_config(&tracing)
             .with_known_contracts(known_contracts)
+            .with_network_profile(self.script_config.network_profile, network_context)
             .with_signature_identifier(SignaturesIdentifier::from_config(
                 &self.script_config.config,
             )?)

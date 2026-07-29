@@ -74,11 +74,14 @@ use foundry_evm::{
         trace_arena_at_depth,
     },
 };
-use foundry_evm_networks::ResolvedNetworkProfile;
+use foundry_evm_networks::{NetworkExecutionContext, ResolvedNetworkProfile};
 use foundry_tui::tui_mode;
 use rand::Rng;
 use regex::Regex;
-use revm::{bytecode::opcode::OpCode, context::Transaction};
+use revm::{
+    bytecode::opcode::OpCode,
+    context::{Block as _, Transaction},
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write,
@@ -2856,6 +2859,11 @@ impl TestArgs {
         // printed once by the caller after all passes complete.
         let is_multi_pass = !runner.tcfg.multi_network.all_override_networks.is_empty();
         let is_tempo_network = runner.tcfg.network_profile.is_tempo();
+        let network_profile = runner.tcfg.network_profile;
+        let network_context = NetworkExecutionContext::new(
+            runner.evm_env.cfg_env.chain_id,
+            runner.evm_env.block_env.timestamp().saturating_to(),
+        );
         let decode_internal = runner.decode_internal != InternalTraceMode::None;
 
         // Run tests in a streaming fashion.
@@ -2881,6 +2889,7 @@ impl TestArgs {
         let mut builder = CallTraceDecoderBuilder::new()
             .with_tracing_config(tracing)
             .with_known_contracts(&known_contracts)
+            .with_network_profile(network_profile, network_context)
             .with_chain_id(remote_chain.map(|c| c.id()))
             .with_tempo_hardfork(
                 (is_tempo_network || remote_chain.is_some_and(|chain| chain.is_tempo()))

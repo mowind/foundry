@@ -11,12 +11,13 @@ use crate::{
         fees::{INITIAL_BASE_FEE, INITIAL_GAS_PRICE},
         pool::transactions::{PoolTransaction, TransactionOrder},
     },
+    evm::compose_precompiles,
     mem::{self, in_memory_db::StateRootDb},
 };
 use alloy_chains::NamedChain;
 use alloy_consensus::BlockHeader;
 use alloy_eips::{eip1559::BaseFeeParams, eip7840::BlobParams};
-use alloy_evm::EvmEnv;
+use alloy_evm::{EvmEnv, precompiles::PrecompilesMap};
 use alloy_genesis::Genesis;
 use alloy_network::{AnyNetwork, BlockResponse, TransactionResponse};
 use alloy_primitives::{Address, BlockNumber, TxHash, U256, hex, map::HashMap, utils::Unit};
@@ -52,6 +53,7 @@ use rand_08::thread_rng;
 use revm::{
     context::{BlockEnv, CfgEnv},
     context_interface::block::BlobExcessGasAndPrice,
+    precompile::{PrecompileSpecId, Precompiles},
     primitives::hardfork::SpecId,
 };
 use serde_json::{Value, json};
@@ -74,7 +76,7 @@ use foundry_evm::{
     traces::{CallTraceDecoderBuilder, identifier::SignaturesIdentifier},
     utils::get_blob_params,
 };
-use foundry_evm_networks::{NetworkConfigs, ResolvedNetworkProfile};
+use foundry_evm_networks::{NetworkConfigs, NetworkExecutionContext, ResolvedNetworkProfile};
 use tempo_precompiles::TIP_FEE_MANAGER_ADDRESS;
 
 /// Default port the rpc will open
@@ -1291,10 +1293,28 @@ impl NodeConfig {
             genesis_init: self.genesis.clone(),
         };
 
-        let mut decoder_builder =
-            CallTraceDecoderBuilder::new().with_tempo_hardfork(network_profile.is_tempo().then(
-                || TempoHardfork::from(self.get_hardfork_with_network_profile(network_profile)),
-            ));
+        let network_context = NetworkExecutionContext::new(
+            evm_env.cfg_env.chain_id,
+            evm_env.block_env.timestamp.saturating_to(),
+        );
+        let mut precompiles = PrecompilesMap::from_static(Precompiles::new(
+            PrecompileSpecId::from_spec_id(evm_env.cfg_env.spec),
+        ));
+        compose_precompiles(
+            &mut precompiles,
+            self.precompile_factory.as_deref(),
+            network_profile,
+            network_context,
+        )
+        .wrap_err_with(|| {
+            format!("failed to initialize network profile `{}`", network_profile.name())
+        })?;
+
+        let mut decoder_builder = CallTraceDecoderBuilder::new()
+            .with_network_profile(network_profile, network_context)
+            .with_tempo_hardfork(network_profile.is_tempo().then(|| {
+                TempoHardfork::from(self.get_hardfork_with_network_profile(network_profile))
+            }));
         if self.print_traces {
             // if traces should get printed we configure the decoder with the signatures cache
             if let Ok(identifier) = SignaturesIdentifier::new(false) {
@@ -1885,6 +1905,43 @@ async fn find_latest_fork_block<P: Provider<AnyNetwork>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "hashkey")]
+    #[tokio::test]
+    async fn hashkey_precompile_collision_is_a_typed_setup_error() {
+        #[derive(Debug)]
+        struct ConflictingFactory;
+
+        impl PrecompileFactory for ConflictingFactory {
+            fn precompiles(&self) -> Vec<(Address, alloy_evm::precompiles::DynPrecompile)> {
+                let address =
+                    alloy_primitives::address!("B20F000000000000000000000000000000000000");
+                let precompile = alloy_evm::precompiles::DynPrecompile::new(
+                    revm::precompile::PrecompileId::Custom("collision-test".into()),
+                    |_| unreachable!(),
+                );
+                vec![(address, precompile)]
+            }
+        }
+
+        let mut config = NodeConfig::test()
+            .with_networks(NetworkConfigs::with_hashkey())
+            .with_precompile_factory(ConflictingFactory);
+        let err = config.setup::<foundry_primitives::FoundryNetwork>().await.unwrap_err();
+        let typed = err
+            .downcast_ref::<foundry_evm_networks::PrecompileCompositionError>()
+            .expect("setup error preserves the typed composition failure");
+
+        assert_eq!(typed.profile(), "hashkey");
+        assert_eq!(
+            typed.address(),
+            alloy_primitives::address!("B20F000000000000000000000000000000000000")
+        );
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("hashkey"));
+        assert!(rendered.contains(&typed.address().to_string()));
+        assert!(rendered.contains("conflicts"));
+    }
 
     #[test]
     fn test_prune_history() {

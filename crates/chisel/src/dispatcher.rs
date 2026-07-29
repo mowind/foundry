@@ -22,6 +22,7 @@ use foundry_evm::{
         render_trace_arena,
     },
 };
+use foundry_evm_networks::NetworkExecutionContext;
 use reqwest::Url;
 use solar::{
     parse::lexer::token::{RawLiteralKind, RawTokenKind},
@@ -165,9 +166,14 @@ impl<FEN: FoundryEvmNetwork> ChiselDispatcher<FEN> {
         let chain_id = session_config.evm_opts.get_remote_chain_id().await;
         let is_tempo = session_config.network_profile.is_tempo()
             || chain_id.as_ref().is_some_and(|chain| chain.is_tempo());
+        let network_context = NetworkExecutionContext::new(
+            session_config.evm_opts.env.chain_id.unwrap_or(31337),
+            session_config.evm_opts.env.block_timestamp.saturating_to(),
+        );
 
         let mut decoder = CallTraceDecoderBuilder::new()
             .with_labels(result.labeled_addresses.clone())
+            .with_network_profile(session_config.network_profile, network_context)
             .with_signature_identifier(SignaturesIdentifier::from_config(
                 &session_config.foundry_config,
             )?)

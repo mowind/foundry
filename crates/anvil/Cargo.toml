@@ -122,6 +122,7 @@ alloy-pubsub.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 foundry-test-utils.workspace = true
+snapbox.workspace = true
 tokio = { workspace = true, features = ["full"] }
 
 [features]

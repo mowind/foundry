@@ -26,6 +26,7 @@ use foundry_evm_core::{
     },
 };
 use foundry_evm_hardforks::TempoHardfork;
+use foundry_evm_networks::{NetworkExecutionContext, NetworkTraceIdentity, ResolvedNetworkProfile};
 use itertools::Itertools;
 use revm::{bytecode::opcode::OpCode, interpreter::InstructionResult};
 use revm_inspectors::tracing::types::{DecodedCallLog, DecodedCallTrace};
@@ -45,6 +46,9 @@ use tempo_precompiles::{
 };
 
 pub(crate) mod precompiles;
+
+#[cfg(feature = "hashkey")]
+mod hashkey;
 
 /// Build a new [CallTraceDecoder].
 #[derive(Default)]
@@ -147,6 +151,18 @@ impl CallTraceDecoderBuilder {
         self
     }
 
+    /// Sets the resolved network semantics and activation snapshot used for trace decoding.
+    #[inline]
+    pub fn with_network_profile(
+        mut self,
+        profile: ResolvedNetworkProfile,
+        context: NetworkExecutionContext,
+    ) -> Self {
+        self.decoder.network_profile = profile;
+        self.decoder.network_context = context;
+        self
+    }
+
     /// Hides addresses in trace parameters when a label is available.
     #[inline]
     pub const fn with_compact_labels(mut self, compact: bool) -> Self {
@@ -232,6 +248,12 @@ pub struct CallTraceDecoder {
 
     /// Hide addresses when a label is available, showing only the label.
     pub compact_labels: bool,
+
+    /// Resolved profile used for network-owned trace identities.
+    pub network_profile: ResolvedNetworkProfile,
+
+    /// Activation snapshot used for network-owned trace identities.
+    pub network_context: NetworkExecutionContext,
 }
 
 impl CallTraceDecoder {
@@ -244,6 +266,13 @@ impl CallTraceDecoder {
         // lazy instead of removing it
         static INIT: OnceLock<CallTraceDecoder> = OnceLock::new();
         INIT.get_or_init(Self::init)
+    }
+
+    /// Updates the activation snapshot used by network-owned trace identities.
+    #[inline]
+    pub const fn with_network_context(mut self, context: NetworkExecutionContext) -> Self {
+        self.network_context = context;
+        self
     }
 
     #[instrument(name = "CallTraceDecoder::init", level = "debug")]
@@ -369,6 +398,10 @@ impl CallTraceDecoder {
             tempo_hardfork: None,
 
             compact_labels: false,
+
+            network_profile: ResolvedNetworkProfile::default(),
+
+            network_context: NetworkExecutionContext::default(),
         }
     }
 
@@ -395,7 +428,12 @@ impl CallTraceDecoder {
         self.labels
             .iter()
             .filter(|(address, _)| {
-                precompiles::is_known_precompile(**address, self.chain_id, self.tempo_hardfork)
+                self.network_trace_identity(**address).is_some()
+                    || precompiles::is_known_precompile(
+                        **address,
+                        self.chain_id,
+                        self.tempo_hardfork,
+                    )
             })
             .map(|(address, label)| (*address, label.clone()))
             .collect()
@@ -405,6 +443,7 @@ impl CallTraceDecoder {
     ///
     /// Unknown contracts are contracts that either lack a label or an ABI.
     pub fn identify(&mut self, arena: &CallTraceArena, identifier: &mut impl TraceIdentifier) {
+        self.collect_network_labels(arena);
         self.collect_identified_addresses(self.identify_addresses(arena, identifier));
     }
 
@@ -419,6 +458,7 @@ impl CallTraceDecoder {
         let nodes = arena.nodes().iter().filter(|node| {
             // Skip precompile addresses, they will never resolve externally.
             if node.is_precompile()
+                || self.network_trace_identity(node.trace.address).is_some()
                 || precompiles::is_known_precompile(
                     node.trace.address,
                     self.chain_id,
@@ -471,6 +511,9 @@ impl CallTraceDecoder {
     }
 
     fn functions_for_selector(&self, address: Address, selector: &Selector) -> Option<&[Function]> {
+        if let Some(identity) = self.network_trace_identity(address) {
+            return Some(network_functions(identity).get(selector).map_or(&[], Vec::as_slice));
+        }
         if self.is_current_committee_active(address) {
             static FUNCTIONS: OnceLock<HashMap<Selector, Vec<Function>>> = OnceLock::new();
             if let Some(functions) = FUNCTIONS
@@ -672,6 +715,8 @@ impl CallTraceDecoder {
             None
         } else if let Some(label) = self.labels.get(&trace.address) {
             Some(label.clone())
+        } else if let Some(identity) = self.network_trace_identity(trace.address) {
+            Some(identity.label().to_string())
         } else if self.is_current_committee_active(trace.address) {
             Some("CurrentCommittee".to_string())
         } else {
@@ -713,6 +758,18 @@ impl CallTraceDecoder {
                     &identified_functions
                 }
             };
+
+            if self.network_trace_identity(trace.address).is_some()
+                && !functions
+                    .iter()
+                    .any(|function| function.abi_decode_input(&trace.data[SELECTOR_LEN..]).is_ok())
+            {
+                return DecodedCallTrace {
+                    label,
+                    call_data: None,
+                    return_data: self.default_return_data(trace).await,
+                };
+            }
 
             // Check if unsupported fn selector: calldata dooes NOT point to one of its selectors +
             // non-fallback contract + no receive
@@ -1084,6 +1141,9 @@ impl CallTraceDecoder {
         output: &[u8],
         status: Option<InstructionResult>,
     ) -> String {
+        if let Some(identity) = self.network_trace_identity(address) {
+            return network_revert_decoder(identity).decode(output, status);
+        }
         if self.is_current_committee_active(address) {
             static DECODER: OnceLock<RevertDecoder> = OnceLock::new();
             let decoder = DECODER
@@ -1112,6 +1172,13 @@ impl CallTraceDecoder {
     async fn decode_event_inner(&self, address: Option<Address>, log: &LogData) -> DecodedCallLog {
         let &[t0, ..] = log.topics() else { return DecodedCallLog { name: None, params: None } };
 
+        if let Some(identity) = address.and_then(|address| self.network_trace_identity(address)) {
+            let Some(events) = network_events(identity).get(&(t0, log.topics().len() - 1)) else {
+                return DecodedCallLog { name: None, params: None };
+            };
+            return self.decode_events(address, log, events);
+        }
+
         let mut events = Vec::new();
         let events = match self.events.get(&(t0, log.topics().len() - 1)) {
             Some(es) => es,
@@ -1124,6 +1191,15 @@ impl CallTraceDecoder {
                 &events
             }
         };
+        self.decode_events(address, log, events)
+    }
+
+    fn decode_events(
+        &self,
+        address: Option<Address>,
+        log: &LogData,
+        events: &[Event],
+    ) -> DecodedCallLog {
         for event in events {
             if let Ok(decoded) = event.decode_log(log) {
                 let params = reconstruct_params(event, &decoded);
@@ -1164,6 +1240,7 @@ impl CallTraceDecoder {
             .flat_map(|node| {
                 node.logs
                     .iter()
+                    .filter(|log| self.network_trace_identity(log.address).is_none())
                     .map(|log| log.raw_log.topics())
                     .filter(|&topics| {
                         if let Some(&first) = topics.first()
@@ -1182,6 +1259,7 @@ impl CallTraceDecoder {
                 // Ignore known addresses.
                 if n.trace.address == DEFAULT_CREATE2_DEPLOYER
                     || n.is_precompile()
+                    || self.network_trace_identity(n.trace.address).is_some()
                     || precompiles::is_known_precompile(
                         n.trace.address,
                         self.chain_id,
@@ -1204,6 +1282,7 @@ impl CallTraceDecoder {
                 // Only consider reverted traces whose output the revert decoder cannot decode.
                 n.trace.status.is_some_and(|s| !s.is_ok())
                     && !n.trace.success
+                    && self.network_trace_identity(n.trace.address).is_none()
                     && self.revert_decoder.maybe_decode_known(&n.trace.output).is_none()
             })
             .filter_map(|n| n.trace.output.first_chunk().map(Selector::from));
@@ -1228,6 +1307,18 @@ impl CallTraceDecoder {
             return format!("{label}: [{addr}]");
         }
         format_token(value)
+    }
+
+    fn network_trace_identity(&self, address: Address) -> Option<NetworkTraceIdentity> {
+        self.network_profile.trace_identity(address, self.network_context)
+    }
+
+    fn collect_network_labels(&mut self, arena: &CallTraceArena) {
+        for address in arena.nodes().iter().map(|node| node.trace.address).unique() {
+            if let Some(identity) = self.network_trace_identity(address) {
+                self.labels.entry(address).or_insert_with(|| identity.label().to_string());
+            }
+        }
     }
 
     fn format_param_value(
@@ -1294,6 +1385,35 @@ impl CallTraceDecoder {
     }
 }
 
+#[cfg(feature = "hashkey")]
+fn network_functions(identity: NetworkTraceIdentity) -> &'static HashMap<Selector, Vec<Function>> {
+    &hashkey::network_abi(identity).functions
+}
+
+#[cfg(not(feature = "hashkey"))]
+fn network_functions(identity: NetworkTraceIdentity) -> &'static HashMap<Selector, Vec<Function>> {
+    match identity {}
+}
+
+#[cfg(feature = "hashkey")]
+fn network_events(identity: NetworkTraceIdentity) -> &'static BTreeMap<(B256, usize), Vec<Event>> {
+    &hashkey::network_abi(identity).events
+}
+
+#[cfg(not(feature = "hashkey"))]
+fn network_events(identity: NetworkTraceIdentity) -> &'static BTreeMap<(B256, usize), Vec<Event>> {
+    match identity {}
+}
+
+#[cfg(feature = "hashkey")]
+fn network_revert_decoder(identity: NetworkTraceIdentity) -> &'static RevertDecoder {
+    &hashkey::network_abi(identity).reverts
+}
+
+#[cfg(not(feature = "hashkey"))]
+fn network_revert_decoder(identity: NetworkTraceIdentity) -> &'static RevertDecoder {
+    match identity {}
+}
 /// Returns `true` if the given function calldata (including function selector) is ABI-encoded.
 ///
 /// This is a simple heuristic to avoid fetching non ABI-encoded selectors.
@@ -1355,6 +1475,273 @@ mod tests {
     use super::*;
     use alloy_primitives::{address, aliases::U96, hex};
     use alloy_sol_types::{SolCall, SolError, SolEvent};
+
+    #[cfg(feature = "hashkey")]
+    use foundry_evm_networks::NetworkConfigs;
+    #[cfg(feature = "hashkey")]
+    use hsk_b20_precompiles::{IActivationRegistry, IB20, IB20Factory, IPolicyRegistry};
+
+    #[cfg(feature = "hashkey")]
+    fn b20_asset_address() -> Address {
+        let mut address = [0u8; 20];
+        address[0] = 0xb2;
+        address[11..].fill(0x11);
+        Address::from(address)
+    }
+
+    #[cfg(feature = "hashkey")]
+    fn b20_stablecoin_address() -> Address {
+        let mut address = [0u8; 20];
+        address[0] = 0xb2;
+        address[10] = 1;
+        address[11..].fill(0x22);
+        Address::from(address)
+    }
+
+    #[cfg(feature = "hashkey")]
+    #[tokio::test]
+    async fn hashkey_trace_identity_decodes_canonical_b20_calls() {
+        let profile = NetworkConfigs::with_hashkey().resolve();
+        let decoder = CallTraceDecoderBuilder::new()
+            .with_network_profile(profile, NetworkExecutionContext::new(177, 0))
+            .build();
+        let asset = b20_asset_address();
+        let is_b20 = Function::parse("isB20(address token) view returns (bool)").unwrap();
+        let balance_of =
+            Function::parse("balanceOf(address account) view returns (uint256)").unwrap();
+
+        let factory = decoder
+            .decode_function(&CallTrace {
+                address: address!("B20F000000000000000000000000000000000000"),
+                data: is_b20.abi_encode_input(&[DynSolValue::Address(asset)]).unwrap().into(),
+                success: true,
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(factory.label.as_deref(), Some("B20Factory"));
+        assert_eq!(factory.call_data.unwrap().signature, "isB20(address)");
+
+        let token = decoder
+            .decode_function(&CallTrace {
+                address: asset,
+                data: balance_of
+                    .abi_encode_input(&[DynSolValue::Address(Address::repeat_byte(0x22))])
+                    .unwrap()
+                    .into(),
+                output: U256::from(7).abi_encode().into(),
+                success: true,
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(token.label.as_deref(), Some("B20Asset"));
+        assert_eq!(token.call_data.unwrap().signature, "balanceOf(address)");
+        assert_eq!(token.return_data.as_deref(), Some("7"));
+    }
+
+    #[cfg(feature = "hashkey")]
+    #[tokio::test]
+    async fn hashkey_trace_identity_covers_fixed_and_variant_surfaces() {
+        let profile = NetworkConfigs::with_hashkey().resolve();
+        let mut decoder = CallTraceDecoderBuilder::new()
+            .with_network_profile(profile, NetworkExecutionContext::new(177, 0))
+            .build();
+        let cases = [
+            (
+                address!("B20F000000000000000000000000000000000000"),
+                "B20Factory",
+                Function::parse("isB20Initialized(address token) view returns (bool)").unwrap(),
+                vec![DynSolValue::Address(b20_asset_address())],
+            ),
+            (
+                address!("8453000000000000000000000000000000000001"),
+                "B20ActivationRegistry",
+                Function::parse("admin() view returns (address)").unwrap(),
+                Vec::new(),
+            ),
+            (
+                address!("8453000000000000000000000000000000000002"),
+                "B20PolicyRegistry",
+                Function::parse("policyExists(uint64 policyId) view returns (bool)").unwrap(),
+                vec![DynSolValue::Uint(U256::from(1), 64)],
+            ),
+            (
+                b20_asset_address(),
+                "B20Asset",
+                Function::parse("multiplier() view returns (uint256)").unwrap(),
+                Vec::new(),
+            ),
+            (
+                b20_stablecoin_address(),
+                "B20Stablecoin",
+                Function::parse("currency() view returns (string)").unwrap(),
+                Vec::new(),
+            ),
+        ];
+
+        let mut arena = CallTraceArena::default();
+        for (address, label, function, args) in cases {
+            let trace = CallTrace {
+                address,
+                data: function.abi_encode_input(&args).unwrap().into(),
+                success: true,
+                ..Default::default()
+            };
+            let decoded = decoder.decode_function(&trace).await;
+            assert_eq!(decoded.label.as_deref(), Some(label));
+            assert_eq!(decoded.call_data.unwrap().signature, function.signature());
+            arena.nodes_mut().push(CallTraceNode { trace, ..Default::default() });
+        }
+
+        decoder.collect_network_labels(&arena);
+        let labels = decoder.precompile_labels();
+        assert_eq!(labels.get(&b20_asset_address()), Some(&"B20Asset".to_string()));
+        assert_eq!(labels.get(&b20_stablecoin_address()), Some(&"B20Stablecoin".to_string()));
+    }
+
+    #[cfg(feature = "hashkey")]
+    #[tokio::test]
+    async fn b20_addresses_are_ordinary_without_active_hashkey_profile() {
+        let asset = b20_asset_address();
+        let multiplier = Function::parse("multiplier() view returns (uint256)").unwrap();
+        let trace = CallTrace {
+            address: asset,
+            data: multiplier.abi_encode_input(&[]).unwrap().into(),
+            output: U256::from(7).abi_encode().into(),
+            success: true,
+            ..Default::default()
+        };
+
+        let decoded = CallTraceDecoderBuilder::new()
+            .with_network_profile(
+                NetworkConfigs::default().resolve(),
+                NetworkExecutionContext::new(1, 0),
+            )
+            .build()
+            .decode_function(&trace)
+            .await;
+
+        assert!(decoded.label.is_none());
+        assert!(decoded.call_data.is_none());
+        assert!(decoded.return_data.is_none());
+    }
+
+    #[cfg(feature = "hashkey")]
+    #[tokio::test]
+    async fn recontextualized_decoder_does_not_retain_hashkey_labels() {
+        let factory = address!("B20F000000000000000000000000000000000000");
+        let trace = CallTrace { address: factory, success: true, ..Default::default() };
+        let decoder = CallTraceDecoderBuilder::new()
+            .with_network_profile(
+                NetworkConfigs::with_hashkey().resolve(),
+                NetworkExecutionContext::new(177, 0),
+            )
+            .with_network_profile(
+                NetworkConfigs::default().resolve(),
+                NetworkExecutionContext::new(1, 0),
+            )
+            .build();
+
+        assert!(decoder.decode_function(&trace).await.label.is_none());
+        assert!(!decoder.precompile_labels().contains_key(&factory));
+    }
+
+    #[cfg(feature = "hashkey")]
+    #[tokio::test]
+    async fn hashkey_b20_errors_and_events_use_address_scoped_abis() {
+        let decoder = CallTraceDecoderBuilder::new()
+            .with_network_profile(
+                NetworkConfigs::with_hashkey().resolve(),
+                NetworkExecutionContext::new(177, 0),
+            )
+            .build();
+        let asset = b20_asset_address();
+
+        let reverted = decoder
+            .decode_function(&CallTrace {
+                address: address!("B20F000000000000000000000000000000000000"),
+                output: IB20Factory::TokenAlreadyExists { token: asset }.abi_encode().into(),
+                success: false,
+                status: Some(InstructionResult::Revert),
+                ..Default::default()
+            })
+            .await;
+        let expected = format!("TokenAlreadyExists({asset})");
+        assert_eq!(reverted.return_data.as_deref(), Some(expected.as_str()));
+
+        let log = IB20::Transfer {
+            from: Address::repeat_byte(0x33),
+            to: Address::repeat_byte(0x44),
+            amount: U256::from(7),
+        }
+        .encode_log_data();
+        let decoded = decoder.decode_event_with_address(asset, &log).await;
+        assert_eq!(decoded.name.as_deref(), Some("Transfer"));
+        assert_eq!(decoded.params.unwrap()[2].1, "7");
+
+        let activation = address!("8453000000000000000000000000000000000001");
+        let reverted = decoder
+            .decode_function(&CallTrace {
+                address: activation,
+                output: IActivationRegistry::Unauthorized { caller: asset }.abi_encode().into(),
+                success: false,
+                status: Some(InstructionResult::Revert),
+                ..Default::default()
+            })
+            .await;
+        let expected = format!("Unauthorized({asset})");
+        assert_eq!(reverted.return_data.as_deref(), Some(expected.as_str()));
+
+        let policy = address!("8453000000000000000000000000000000000002");
+        let reverted = decoder
+            .decode_function(&CallTrace {
+                address: policy,
+                output: IPolicyRegistry::PolicyNotFound {}.abi_encode().into(),
+                success: false,
+                status: Some(InstructionResult::Revert),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(reverted.return_data.as_deref(), Some("PolicyNotFound()"));
+    }
+
+    #[cfg(feature = "hashkey")]
+    #[tokio::test]
+    async fn hashkey_b20_does_not_guess_across_variants_or_malformed_data() {
+        let decoder = CallTraceDecoderBuilder::new()
+            .with_network_profile(
+                NetworkConfigs::with_hashkey().resolve(),
+                NetworkExecutionContext::new(177, 0),
+            )
+            .build();
+        let multiplier = Function::parse("multiplier() view returns (uint256)").unwrap();
+        let stablecoin = b20_stablecoin_address();
+
+        let cross_variant = decoder
+            .decode_function(&CallTrace {
+                address: stablecoin,
+                data: multiplier.abi_encode_input(&[]).unwrap().into(),
+                output: U256::from(7).abi_encode().into(),
+                success: true,
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(cross_variant.label.as_deref(), Some("B20Stablecoin"));
+        assert!(cross_variant.call_data.is_none());
+
+        let balance_of =
+            Function::parse("balanceOf(address account) view returns (uint256)").unwrap();
+        let malformed = decoder
+            .decode_function(&CallTrace {
+                address: b20_asset_address(),
+                data: balance_of.selector().to_vec().into(),
+                output: alloy_primitives::bytes!("deadbeef"),
+                success: true,
+                ..Default::default()
+            })
+            .await;
+        assert!(malformed.call_data.is_none());
+        assert!(malformed.return_data.is_none());
+    }
 
     #[test]
     fn test_selector_collision_resolution() {

@@ -51,7 +51,7 @@ use foundry_evm::{
     opts::EvmOpts,
     traces::{InternalTraceMode, SparsedTraceArena, TraceRequirements, Traces},
 };
-use foundry_evm_networks::{NetworkConfigs, ResolvedNetworkProfile};
+use foundry_evm_networks::{NetworkConfigs, NetworkExecutionContext, ResolvedNetworkProfile};
 use futures::TryFutureExt;
 use revm::{DatabaseRef, context::Block, primitives::hardfork::SpecId};
 
@@ -280,6 +280,12 @@ impl RunArgs {
             };
 
             let chain = alloy_chains::Chain::from_id(provider.get_chain_id().await?);
+            let block = provider
+                .get_block(tx_block_number.into())
+                .await?
+                .ok_or_else(|| eyre::eyre!("block not found: {tx_block_number}"))?;
+            let network_context =
+                NetworkExecutionContext::new(chain.id(), block.header().timestamp());
             handle_traces(
                 result,
                 &config,
@@ -292,6 +298,8 @@ impl RunArgs {
                     FoundryHardfork::Tempo(hardfork) => Some(hardfork),
                     _ => None,
                 }),
+                network_profile,
+                network_context,
             )
             .await?;
 
@@ -508,6 +516,11 @@ impl RunArgs {
             }
         }
 
+        let network_context = NetworkExecutionContext::new(
+            evm_env.cfg_env.chain_id,
+            evm_env.block_env.timestamp().saturating_to(),
+        );
+
         // Execute our transaction
         let result = {
             executor.set_trace_printer(self.trace_printer);
@@ -537,6 +550,8 @@ impl RunArgs {
             with_local_artifacts,
             debug,
             resolved_tempo_hardfork,
+            network_profile,
+            network_context,
         )
         .await?;
 

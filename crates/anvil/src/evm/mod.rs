@@ -1,5 +1,8 @@
 use alloy_evm::precompiles::{DynPrecompile, PrecompilesMap};
 use alloy_primitives::Address;
+use foundry_evm_networks::{
+    NetworkExecutionContext, PrecompileCompositionError, ResolvedNetworkProfile,
+};
 use std::fmt::Debug;
 
 #[cfg(feature = "optimism")]
@@ -15,6 +18,19 @@ pub trait PrecompileFactory: Send + Sync + Unpin + Debug {
     fn install(&self, precompiles: &mut PrecompilesMap) {
         precompiles.extend_precompiles(self.precompiles());
     }
+}
+
+/// Composes user-provided and resolved-profile precompiles in their canonical order.
+pub(crate) fn compose_precompiles(
+    precompiles: &mut PrecompilesMap,
+    factory: Option<&dyn PrecompileFactory>,
+    profile: ResolvedNetworkProfile,
+    context: NetworkExecutionContext,
+) -> Result<(), PrecompileCompositionError> {
+    if let Some(factory) = factory {
+        factory.install(precompiles);
+    }
+    profile.inject_precompiles(precompiles, context)
 }
 
 #[cfg(test)]

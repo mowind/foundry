@@ -2,6 +2,7 @@
 
 #[cfg(feature = "cli")]
 use std::{
+    io::Read,
     net::TcpListener,
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -11,9 +12,13 @@ use std::{
 #[cfg(feature = "cli")]
 use crate::utils::http_provider;
 use alloy_eips::eip7910::EthConfig;
-use alloy_network::AnyNetwork;
+use alloy_network::{AnyNetwork, TransactionBuilder};
 use alloy_primitives::{Address, Bytes, U256, address, b256};
 use alloy_provider::Provider;
+#[cfg(feature = "cli")]
+use alloy_rpc_types::TransactionRequest;
+#[cfg(feature = "cli")]
+use alloy_sol_types::{SolCall, sol};
 use anvil::{NodeConfig, spawn};
 use foundry_evm_networks::NetworkConfigs;
 
@@ -29,6 +34,13 @@ const FEATURE_STABLECOIN_SLOT: U256 = U256::from_be_bytes(
 const FEATURE_ASSET_SLOT: U256 = U256::from_be_bytes(
     b256!("819420403a306232adb8ee78d9f35b5090371155b34376cf9b020e30029278e5").0,
 );
+
+#[cfg(feature = "cli")]
+sol! {
+    interface IB20Factory {
+        function isB20(address token) external view returns (bool);
+    }
+}
 
 #[cfg(feature = "cli")]
 struct ChildGuard(Child);
@@ -161,4 +173,66 @@ async fn hashkey_cli_starts_with_b20_baseline() {
     assert!(ready, "anvil --network hashkey should start serving RPC");
 
     assert_hashkey_genesis_baseline(&provider).await;
+}
+
+#[cfg(feature = "cli")]
+#[tokio::test(flavor = "multi_thread")]
+async fn hashkey_cli_prints_profile_aware_b20_traces() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let port_arg = port.to_string();
+
+    let mut child = ChildGuard(
+        Command::new(anvil_binary())
+            .args([
+                "--network",
+                "hashkey",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                &port_arg,
+                "--print-traces",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn anvil --network hashkey --print-traces"),
+    );
+
+    let provider = http_provider(&format!("http://127.0.0.1:{port}"));
+    let mut ready = false;
+    for _ in 0..100 {
+        if provider.get_chain_id().await.is_ok() {
+            ready = true;
+            break;
+        }
+        if let Some(status) = child.0.try_wait().unwrap() {
+            panic!("anvil exited before serving RPC: {status}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(ready, "anvil --network hashkey should start serving RPC");
+
+    let tx = TransactionRequest::default()
+        .to(B20_FACTORY)
+        .with_input(IB20Factory::isB20Call { token: Address::repeat_byte(0x11) }.abi_encode());
+    provider.call(tx.into()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    let mut output = String::new();
+    child.0.stdout.take().unwrap().read_to_string(&mut output).unwrap();
+    child.0.stderr.take().unwrap().read_to_string(&mut output).unwrap();
+    let trace = output[output.find("Traces=\n").expect("Anvil printed the trace")..].trim_end();
+    snapbox::assert_data_eq!(
+        trace,
+        foundry_test_utils::str![[r#"
+Traces=
+  [12] B20Factory::isB20(0x1111111111111111111111111111111111111111)
+    └─ ← [Return] false
+"#]]
+    );
 }

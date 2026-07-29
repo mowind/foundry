@@ -9,8 +9,9 @@ use crate::{
     traces::TraceKind,
     tx::{CastTxBuilder, SenderKind},
 };
+use alloy_consensus::BlockHeader;
 use alloy_ens::NameOrAddress;
-use alloy_network::{Network, NetworkTransactionBuilder, TransactionBuilder};
+use alloy_network::{BlockResponse, Network, NetworkTransactionBuilder, TransactionBuilder};
 use alloy_primitives::{Bytes, TxKind, U256, hex, map::AddressHashMap};
 use alloy_provider::{Provider, ext::DebugApi};
 use alloy_rpc_types::{
@@ -52,8 +53,9 @@ use foundry_evm::{
     opts::EvmOpts,
     traces::{InternalTraceMode, SparsedTraceArena, TraceRequirements},
 };
-use foundry_evm_networks::{NetworkConfigs, ResolvedNetworkProfile};
+use foundry_evm_networks::{NetworkConfigs, NetworkExecutionContext, ResolvedNetworkProfile};
 use foundry_wallets::WalletOpts;
+use revm::context::Block as _;
 use std::str::FromStr;
 
 /// CLI arguments for `cast call`.
@@ -316,6 +318,7 @@ impl CallArgs {
 
         if self.debug_trace_call {
             let block = self.block.unwrap_or(BlockId::latest());
+            let override_timestamp = block_overrides.as_ref().and_then(|overrides| overrides.time);
             let mut call_options = GethDebugTracingCallOptions::default().with_tracing_options(
                 GethDebugTracingOptions::default()
                     .with_tracer(GethDebugTracerType::from(GethDebugBuiltInTracerType::CallTracer))
@@ -397,6 +400,17 @@ impl CallArgs {
             };
 
             let chain = alloy_chains::Chain::from_id(provider.get_chain_id().await?);
+            let block_timestamp = if let Some(timestamp) = override_timestamp {
+                timestamp
+            } else {
+                provider
+                    .get_block(block)
+                    .await?
+                    .ok_or_else(|| eyre::eyre!("block not found: {block}"))?
+                    .header()
+                    .timestamp()
+            };
+            let network_context = NetworkExecutionContext::new(chain.id(), block_timestamp);
             handle_traces(
                 result,
                 &config,
@@ -406,6 +420,8 @@ impl CallArgs {
                 with_local_artifacts,
                 false,
                 None,
+                network_profile,
+                network_context,
             )
             .await?;
 
@@ -438,6 +454,11 @@ impl CallArgs {
                     evm_env.block_env.set_timestamp(U256::from(time));
                 }
             }
+
+            let network_context = NetworkExecutionContext::new(
+                evm_env.cfg_env.chain_id,
+                evm_env.block_env.timestamp().saturating_to(),
+            );
 
             let trace_requirements = TraceRequirements::none()
                 .with_calls(true)
@@ -524,6 +545,8 @@ impl CallArgs {
                 with_local_artifacts,
                 debug,
                 None,
+                network_profile,
+                network_context,
             )
             .await?;
 

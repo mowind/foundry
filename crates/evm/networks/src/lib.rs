@@ -328,6 +328,76 @@ impl NetworkExecutionContext {
     }
 }
 
+/// Canonical network-owned contract identity used by trace and debugger projections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetworkTraceIdentity {
+    /// HashKey B20 factory singleton.
+    #[cfg(feature = "hashkey")]
+    B20Factory,
+    /// HashKey B20 activation registry singleton.
+    #[cfg(feature = "hashkey")]
+    B20ActivationRegistry,
+    /// HashKey B20 policy registry singleton.
+    #[cfg(feature = "hashkey")]
+    B20PolicyRegistry,
+    /// HashKey B20 Asset dynamic token.
+    #[cfg(feature = "hashkey")]
+    B20Asset,
+    /// HashKey B20 Stablecoin dynamic token.
+    #[cfg(feature = "hashkey")]
+    B20Stablecoin,
+}
+
+impl NetworkTraceIdentity {
+    /// Returns the stable user-facing trace label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            #[cfg(feature = "hashkey")]
+            Self::B20Factory => "B20Factory",
+            #[cfg(feature = "hashkey")]
+            Self::B20ActivationRegistry => "B20ActivationRegistry",
+            #[cfg(feature = "hashkey")]
+            Self::B20PolicyRegistry => "B20PolicyRegistry",
+            #[cfg(feature = "hashkey")]
+            Self::B20Asset => "B20Asset",
+            #[cfg(feature = "hashkey")]
+            Self::B20Stablecoin => "B20Stablecoin",
+        }
+    }
+
+    /// Returns the singleton address for fixed identities.
+    pub const fn fixed_address(self) -> Option<Address> {
+        #[cfg(feature = "hashkey")]
+        {
+            use b20_addresses::{B20_ACTIVATION_REGISTRY, B20_FACTORY, B20_POLICY_REGISTRY};
+
+            return match self {
+                Self::B20Factory => Some(B20_FACTORY),
+                Self::B20ActivationRegistry => Some(B20_ACTIVATION_REGISTRY),
+                Self::B20PolicyRegistry => Some(B20_POLICY_REGISTRY),
+                Self::B20Asset | Self::B20Stablecoin => None,
+            };
+        }
+        #[cfg(not(feature = "hashkey"))]
+        match self {}
+    }
+
+    /// Returns all fixed network-owned trace identities.
+    pub const fn fixed_identities() -> &'static [Self] {
+        #[cfg(feature = "hashkey")]
+        {
+            const IDENTITIES: &[NetworkTraceIdentity] = &[
+                NetworkTraceIdentity::B20Factory,
+                NetworkTraceIdentity::B20ActivationRegistry,
+                NetworkTraceIdentity::B20PolicyRegistry,
+            ];
+            return IDENTITIES;
+        }
+        #[cfg(not(feature = "hashkey"))]
+        &[]
+    }
+}
+
 /// State preparation selected by a resolved network profile.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NetworkStatePlan {
@@ -451,6 +521,10 @@ pub struct ResolvedNetworkProfile {
     bypass_prevrandao: bool,
     #[cfg(feature = "hashkey")]
     hashkey: bool,
+    #[cfg(feature = "hashkey")]
+    b20_activation_time: Option<u64>,
+    #[cfg(feature = "hashkey")]
+    b20_activation_admin: Option<Address>,
 }
 
 impl ResolvedNetworkProfile {
@@ -493,15 +567,47 @@ impl ResolvedNetworkProfile {
         self.hashkey
     }
 
+    /// Resolves an address to a network-owned trace identity for one activation snapshot.
+    ///
+    /// Dynamic B20 tokens are identified only from the canonical address variant. This does not
+    /// read mutable token metadata or imply that an uninitialized structural address has code.
+    pub fn trace_identity(
+        self,
+        address: Address,
+        context: NetworkExecutionContext,
+    ) -> Option<NetworkTraceIdentity> {
+        #[cfg(feature = "hashkey")]
+        if self.hashkey && self.b20_config().is_active_at(context.timestamp) {
+            use b20_addresses::{B20_ACTIVATION_REGISTRY, B20_FACTORY, B20_POLICY_REGISTRY};
+            use hsk_b20_precompiles::B20Variant;
+
+            return match address {
+                B20_FACTORY => Some(NetworkTraceIdentity::B20Factory),
+                B20_ACTIVATION_REGISTRY => Some(NetworkTraceIdentity::B20ActivationRegistry),
+                B20_POLICY_REGISTRY => Some(NetworkTraceIdentity::B20PolicyRegistry),
+                address => match B20Variant::from_address(address) {
+                    Some(B20Variant::Asset) => Some(NetworkTraceIdentity::B20Asset),
+                    Some(B20Variant::Stablecoin) => Some(NetworkTraceIdentity::B20Stablecoin),
+                    None => None,
+                },
+            };
+        }
+        let _ = (address, context);
+        None
+    }
+
+    #[cfg(all(test, feature = "hashkey"))]
+    fn with_b20_config(mut self, config: hsk_b20_config::B20Config) -> Self {
+        self.b20_activation_time = config.activation_time();
+        self.b20_activation_admin = config.activation_admin();
+        self
+    }
+
     /// Returns the B20 consensus configuration for standalone local development.
     #[cfg(feature = "hashkey")]
     pub fn b20_config(self) -> hsk_b20_config::B20Config {
-        if self.hashkey {
-            hsk_b20_config::B20Config::new(Some(0), Some(HSK_B20_LOCAL_ADMIN))
-                .expect("standalone HashKey B20 config is always valid")
-        } else {
-            hsk_b20_config::B20Config::DISABLED
-        }
+        hsk_b20_config::B20Config::new(self.b20_activation_time, self.b20_activation_admin)
+            .expect("resolved HashKey B20 config is valid")
     }
 
     /// Returns the B20 standalone genesis alloc for non-fork execution.
@@ -681,7 +787,10 @@ impl ResolvedNetworkProfile {
         B20Factory::install_with_observer(precompiles, B20Spec::Beryl, NoopPrecompileCallObserver);
         PolicyRegistryPrecompile::install(precompiles, B20Spec::Beryl);
         ActivationRegistry::install(precompiles, config.activation_admin());
-        BerylLookup::install(precompiles);
+        precompiles.map_precompile_lookup(|address, previous| {
+            BerylLookup::lookup(address)
+                .or_else(|| previous.and_then(|lookup| lookup.lookup(address)))
+        });
 
         Ok(())
     }
@@ -852,12 +961,18 @@ impl NetworkConfigs {
             Some(NetworkVariant::HashKey) => EvmFamily::Optimism,
             Some(NetworkVariant::Tempo) => EvmFamily::Tempo,
         };
+        #[cfg(feature = "hashkey")]
+        let hashkey = matches!(self.resolved_network(), Some(NetworkVariant::HashKey));
         ResolvedNetworkProfile {
             family,
             celo: self.celo,
             bypass_prevrandao: self.bypass_prevrandao,
             #[cfg(feature = "hashkey")]
-            hashkey: matches!(self.resolved_network(), Some(NetworkVariant::HashKey)),
+            hashkey,
+            #[cfg(feature = "hashkey")]
+            b20_activation_time: if hashkey { Some(0) } else { None },
+            #[cfg(feature = "hashkey")]
+            b20_activation_admin: if hashkey { Some(HSK_B20_LOCAL_ADMIN) } else { None },
         }
     }
 
@@ -1328,6 +1443,27 @@ mod tests {
         }
 
         #[test]
+        fn trace_identity_follows_the_activation_snapshot() {
+            let config =
+                hsk_b20_config::B20Config::new(Some(100), Some(Address::repeat_byte(0x11)))
+                    .unwrap();
+            let profile = NetworkConfigs::with_hashkey().resolve().with_b20_config(config);
+            let asset = hsk_b20_precompiles::B20Variant::Asset
+                .compute_address(Address::repeat_byte(0x22), B256::repeat_byte(0x33))
+                .0;
+
+            assert_eq!(profile.trace_identity(asset, NetworkExecutionContext::new(177, 99)), None);
+            assert_eq!(
+                profile.trace_identity(asset, NetworkExecutionContext::new(177, 100)),
+                Some(NetworkTraceIdentity::B20Asset)
+            );
+            assert_eq!(
+                profile.trace_identity(asset, NetworkExecutionContext::new(177, 101)),
+                Some(NetworkTraceIdentity::B20Asset)
+            );
+        }
+
+        #[test]
         fn injects_b20_singletons_and_lookup() {
             let profile = NetworkConfigs::with_hashkey().resolve();
             let mut precompiles =
@@ -1340,6 +1476,35 @@ mod tests {
             assert!(precompiles.get(&B20_FACTORY).is_some());
             assert!(precompiles.get(&B20_ACTIVATION_REGISTRY).is_some());
             assert!(precompiles.get(&B20_POLICY_REGISTRY).is_some());
+        }
+
+        #[test]
+        fn b20_lookup_composes_with_an_existing_dynamic_resolver() {
+            let profile = NetworkConfigs::with_hashkey().resolve();
+            let mut precompiles =
+                PrecompilesMap::from_static(revm::precompile::Precompiles::prague());
+            let custom_address = Address::repeat_byte(0x44);
+            precompiles.set_precompile_lookup(move |address: &Address| {
+                (*address == custom_address).then(|| {
+                    DynPrecompile::new(
+                        PrecompileId::Custom(std::borrow::Cow::Borrowed("custom-lookup")),
+                        |_| unreachable!(),
+                    )
+                })
+            });
+
+            profile
+                .inject_precompiles(&mut precompiles, NetworkExecutionContext::new(177, 0))
+                .unwrap();
+            let asset = hsk_b20_precompiles::B20Variant::Asset
+                .compute_address(Address::repeat_byte(0x22), B256::repeat_byte(0x33))
+                .0;
+
+            assert_eq!(
+                precompiles.get(&custom_address).unwrap().precompile_id().name(),
+                "custom-lookup"
+            );
+            assert!(precompiles.get(&asset).is_some());
         }
 
         #[test]

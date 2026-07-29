@@ -54,9 +54,17 @@ fn wait_for_receipt(cmd: &mut foundry_test_utils::TestCommand, tx_hash: &str, rp
     cmd.cast_fuse().args(["receipt", tx_hash, "--rpc-url", rpc]).assert_success();
 }
 
-casttest!(hashkey_b20_anvil_cast_workflow, async |_prj, cmd| {
+casttest!(hashkey_b20_anvil_cast_workflow, async |prj, cmd| {
     let (_api, handle) =
         anvil::spawn(NodeConfig::test().with_networks(NetworkConfigs::with_hashkey())).await;
+    prj.create_file(
+        "foundry.toml",
+        r#"
+[default]
+network = "hashkey"
+"#,
+    );
+    cmd.set_current_dir(prj.root());
     let rpc = handle.http_endpoint();
     let factory = B20_FACTORY.to_string();
     let activation_registry = B20_ACTIVATION_REGISTRY.to_string();
@@ -175,8 +183,64 @@ casttest!(hashkey_b20_anvil_cast_workflow, async |_prj, cmd| {
 "#]]);
 
     cmd.cast_fuse()
+        .args([
+            "call",
+            &token,
+            "balanceOf(address)(uint256)",
+            &recipient,
+            "--debug-trace-call",
+            "--rpc-url",
+            &rpc,
+        ])
+        .assert_success()
+        .stdout_eq(str![[r#"
+Traces:
+  [23644] B20Asset::balanceOf(0x70997970C51812dc3A010C7d01b50e0d17dc79C8)
+    └─ ← [Return] 42
+
+
+Transaction successfully executed.
+[GAS]
+
+"#]]);
+
+    cmd.cast_fuse()
         .args(["run", &mint_tx, "--network", "hashkey", "--rpc-url", &rpc])
-        .assert_success();
+        .assert_success()
+        .stdout_eq(str![[r#"
+Traces:
+  [54474] B20Asset::mint(0x70997970C51812dc3A010C7d01b50e0d17dc79C8, 42)
+    ├─ emit Transfer(from: 0x0000000000000000000000000000000000000000, to: 0x70997970C51812dc3A010C7d01b50e0d17dc79C8, amount: 42)
+    └─ ← [Return]
+
+
+Transaction successfully executed.
+[GAS]
+
+"#]]);
+
+    cmd.cast_fuse()
+        .args([
+            "run",
+            &mint_tx,
+            "--debug-trace-transaction",
+            "--network",
+            "hashkey",
+            "--rpc-url",
+            &rpc,
+        ])
+        .assert_success()
+        .stdout_eq(str![[r#"
+Traces:
+  [76046] B20Asset::mint(0x70997970C51812dc3A010C7d01b50e0d17dc79C8, 42)
+    ├─ emit Transfer(from: 0x0000000000000000000000000000000000000000, to: 0x70997970C51812dc3A010C7d01b50e0d17dc79C8, amount: 42)
+    └─ ← [Return]
+
+
+Transaction successfully executed.
+[GAS]
+
+"#]]);
 
     cmd.cast_fuse()
         .args(["rpc", "anvil_impersonateAccount", &admin, "--rpc-url", &rpc])

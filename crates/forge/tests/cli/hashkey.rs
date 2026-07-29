@@ -5,7 +5,7 @@
 //! Stablecoin creation, ActivationRegistry/PolicyRegistry transitions, snapshot/revert,
 //! cheatcode protection and Factory atomic rollback — through the native precompiles.
 
-use foundry_test_utils::forgetest_init;
+use foundry_test_utils::{forgetest_init, str};
 
 forgetest_init!(hashkey_b20_state_lifecycle, |prj, cmd| {
     // Add the B20 interfaces, caller helper and shared test base.
@@ -48,4 +48,19 @@ network = "hashkey"
 
     // Run only the B20 fixtures to avoid Counter test noise.
     cmd.arg("test").arg("--match-path").arg("B20").assert_success();
+
+    cmd.forge_fuse()
+        .args(["test", "--match-test", "testStateChangingTokenOperation", "-vvvv"])
+        .assert_success()
+        .stdout_eq(str![[r#"
+...
+Traces:
+...
+    [..] B20Factory::createB20([..])
+...
+    [..] B20Asset::mint([..])
+...
+    [..] B20Asset::transfer([..])
+...
+"#]]);
 });
